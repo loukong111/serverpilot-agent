@@ -354,14 +354,16 @@ button.danger {
 .workflow-panel[hidden],
 .output-view[hidden],
 .talk-panel[hidden],
-.job-panel[hidden] {
+.job-panel[hidden],
+.proposal-toolbar[hidden] {
   display: none;
 }
 
 .panel-heading,
 .talk-header,
 .job-heading,
-.output-toolbar {
+.output-toolbar,
+.proposal-toolbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -542,9 +544,55 @@ progress {
 
 .markdown,
 .trace,
-.json-view {
+.json-view,
+.diff-view {
   margin: 0;
   padding: 24px;
+}
+
+.proposal-toolbar {
+  min-height: 70px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-muted);
+  padding: 12px 18px;
+}
+
+.proposal-status {
+  margin: 2px 0 0;
+  font-size: 14px;
+  font-weight: 750;
+}
+
+.diff-view {
+  min-height: 410px;
+  overflow: auto;
+  background: #172126;
+  color: #dfe7e9;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  line-height: 1.65;
+  white-space: pre;
+}
+
+.diff-view span {
+  display: block;
+  min-height: 20px;
+  padding: 0 8px;
+}
+
+.diff-view .diff-header {
+  background: #25363d;
+  color: #a9d8dd;
+}
+
+.diff-view .diff-add {
+  background: #173a31;
+  color: #bce7d5;
+}
+
+.diff-view .diff-remove {
+  background: #442725;
+  color: #f1c2bc;
 }
 
 .talk-panel {
@@ -735,7 +783,8 @@ progress {
   }
 
   .panel-heading,
-  .talk-header {
+  .talk-header,
+  .proposal-toolbar {
     align-items: flex-start;
     flex-direction: column;
   }
@@ -777,6 +826,7 @@ progress {
   .markdown,
   .trace,
   .json-view,
+  .diff-view,
   .talk-panel {
     padding: 16px;
   }

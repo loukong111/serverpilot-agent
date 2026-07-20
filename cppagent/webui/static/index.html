@@ -41,6 +41,7 @@
       <section class="main-area">
         <nav class="workflow-tabs" role="tablist" aria-label="工作区">
           <button class="workflow-tab active" type="button" role="tab" aria-selected="true" data-workflow="analysisPanel">项目分析</button>
+          <button class="workflow-tab" type="button" role="tab" aria-selected="false" data-workflow="codingPanel">代码修改</button>
           <button class="workflow-tab" type="button" role="tab" aria-selected="false" data-workflow="interviewPanel">面试准备</button>
           <button class="workflow-tab" type="button" role="tab" aria-selected="false" data-workflow="diagnosisPanel">项目诊断</button>
         </nav>
@@ -126,6 +127,39 @@
             </details>
           </section>
 
+          <section id="codingPanel" class="workflow-panel" role="tabpanel" hidden>
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">Coding Agent</p>
+                <h2>代码修改</h2>
+              </div>
+              <button id="codingBtn" class="primary" type="button">生成修改方案</button>
+            </div>
+            <div class="form-grid">
+              <label class="field wide-field" for="codingTask">
+                <span>开发任务</span>
+                <textarea id="codingTask" rows="5">为项目补充一个小型功能，并添加对应单元测试</textarea>
+              </label>
+            </div>
+            <details class="settings-block">
+              <summary>模型设置</summary>
+              <div class="form-grid three-columns">
+                <label class="field" for="codingModelName">
+                  <span>模型</span>
+                  <input id="codingModelName" placeholder="PROJECTAGENTCPP_MODEL" spellcheck="false" />
+                </label>
+                <label class="field" for="codingApiKey">
+                  <span>API Key</span>
+                  <input id="codingApiKey" type="password" placeholder="OPENAI_API_KEY" autocomplete="off" spellcheck="false" />
+                </label>
+                <label class="field" for="codingBaseUrl">
+                  <span>Base URL</span>
+                  <input id="codingBaseUrl" value="https://api.openai.com/v1" spellcheck="false" />
+                </label>
+              </div>
+            </details>
+          </section>
+
           <section id="interviewPanel" class="workflow-panel" role="tabpanel" hidden>
             <div class="panel-heading">
               <div>
@@ -172,7 +206,7 @@
               <div class="form-grid two-columns">
                 <label class="field" for="cmakeArgs">
                   <span>CMake 参数</span>
-                  <input id="cmakeArgs" value="-DMINIREDIS_ENABLE_INTEGRATION_TESTS=OFF" spellcheck="false" />
+                  <input id="cmakeArgs" placeholder="-DCMAKE_BUILD_TYPE=Debug" spellcheck="false" />
                 </label>
                 <label class="field" for="buildArgs">
                   <span>构建参数</span>
@@ -218,6 +252,7 @@
           <div class="output-toolbar">
             <nav class="output-tabs" role="tablist" aria-label="输出视图">
               <button class="output-tab active" type="button" role="tab" aria-selected="true" data-view="reportView">报告</button>
+              <button class="output-tab" type="button" role="tab" aria-selected="false" data-view="diffView">代码 Diff</button>
               <button class="output-tab" type="button" role="tab" aria-selected="false" data-view="traceView">Trace</button>
               <button class="output-tab" type="button" role="tab" aria-selected="false" data-view="jsonView">JSON</button>
             </nav>
@@ -243,6 +278,21 @@
               <p id="talkOutput" class="talk-output"></p>
             </section>
             <div id="reportOutput" class="markdown empty-state">等待分析结果</div>
+          </section>
+
+          <section id="diffView" class="output-view" role="tabpanel" hidden>
+            <div id="proposalToolbar" class="proposal-toolbar" hidden>
+              <div>
+                <p class="eyebrow">Proposal</p>
+                <p id="proposalStatus" class="proposal-status">等待修改方案</p>
+              </div>
+              <div class="action-row">
+                <button id="rollbackPatchBtn" class="danger" type="button" disabled>回滚</button>
+                <button id="verifyPatchBtn" type="button" disabled>构建测试</button>
+                <button id="applyPatchBtn" class="primary" type="button" disabled>应用补丁</button>
+              </div>
+            </div>
+            <pre id="diffOutput" class="diff-view empty-state">等待 Coding Agent 生成候选补丁</pre>
           </section>
 
           <section id="traceView" class="output-view" role="tabpanel" hidden>

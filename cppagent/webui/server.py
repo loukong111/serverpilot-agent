@@ -23,6 +23,8 @@ ROOT = Path(__file__).resolve().parents[1]
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 REPORT_DIR = ROOT / "reports" / "web"
 HISTORY_DIR = REPORT_DIR / "history"
+PROPOSAL_DIR = REPORT_DIR / "coding" / "proposals"
+BACKUP_DIR = REPORT_DIR / "coding" / "backups"
 MAX_REQUEST_BYTES = 1024 * 1024
 
 if str(ROOT) not in sys.path:
@@ -39,6 +41,18 @@ from agent.project_agent.clang_ast import (  # noqa: E402
     analyze_ast,
     ast_result_to_json,
     generate_ast_report,
+)
+from agent.project_agent.coding_agent import (  # noqa: E402
+    CodingAgentError,
+    apply_proposal,
+    build_coding_messages,
+    collect_code_context,
+    load_proposal,
+    parse_coding_response,
+    proposal_markdown,
+    rollback_proposal,
+    save_proposal,
+    validate_patch,
 )
 from agent.project_agent.diagnostics import (  # noqa: E402
     generate_diagnostic_report,
@@ -399,6 +413,135 @@ def handle_agent(
     }
 
 
+def handle_coding(
+    payload: dict[str, Any],
+    progress: ProgressCallback = noop_progress,
+    should_cancel: CancelCallback = never_cancel,
+) -> dict[str, Any]:
+    project_path = safe_project_path(payload.get("project_path"))
+    task = str(payload.get("task") or "").strip()
+    if not task:
+        raise ValueError("请输入代码修改任务。")
+
+    progress(8, "正在分析项目事实")
+    analysis = get_analysis(project_path, progress, should_cancel)
+    check_cancel(should_cancel)
+    progress(46, "正在检索相关源码")
+    context = collect_code_context(project_path, task)
+    if not context["files"]:
+        raise CodingAgentError("没有找到可供修改的源码文件。")
+
+    check_cancel(should_cancel)
+    progress(62, "Coding Agent 正在生成修改方案")
+    model = str(
+        payload.get("model")
+        or os.environ.get("PROJECTAGENTCPP_MODEL")
+        or os.environ.get("OPENAI_MODEL")
+        or ""
+    )
+    base_url = str(
+        payload.get("base_url")
+        or os.environ.get("PROJECTAGENTCPP_BASE_URL")
+        or os.environ.get("OPENAI_BASE_URL")
+        or "https://api.openai.com/v1"
+    )
+    client = LLMClient(
+        LLMConfig(
+            model=model,
+            base_url=base_url,
+            api_key_env=str(payload.get("api_key_env") or "OPENAI_API_KEY"),
+            api_key=str(payload.get("api_key") or ""),
+            timeout_seconds=120,
+            temperature=0.15,
+        )
+    )
+    response = client.chat(build_coding_messages(task, analysis, context))
+    proposal = parse_coding_response(response)
+
+    check_cancel(should_cancel)
+    progress(82, "正在校验候选补丁")
+    validate_patch(project_path, proposal["patch"])
+    record = save_proposal(PROPOSAL_DIR, project_path, task, proposal, context)
+    markdown = proposal_markdown(record)
+    trace = {
+        "task": task,
+        "root": str(project_path),
+        "steps": [
+            {
+                "index": 1,
+                "tool": "analyze_project",
+                "success": True,
+                "duration_ms": 0,
+                "observation": "已提取项目结构、构建配置和模块事实。",
+            },
+            {
+                "index": 2,
+                "tool": "search_code",
+                "success": True,
+                "duration_ms": 0,
+                "observation": f"命中 {len(context['matches'])} 处代码，读取 {len(context['files'])} 个上下文文件。",
+            },
+            {
+                "index": 3,
+                "tool": "generate_patch",
+                "success": True,
+                "duration_ms": 0,
+                "observation": f"生成涉及 {len(record['files'])} 个文件的候选补丁。",
+            },
+            {
+                "index": 4,
+                "tool": "validate_patch",
+                "success": True,
+                "duration_ms": 0,
+                "observation": "候选补丁已通过路径检查和 git apply --check。",
+            },
+        ],
+    }
+    history_item = save_history(
+        "coding",
+        project_path,
+        "代码修改方案",
+        markdown,
+        {"proposal": record, "trace": trace},
+        used_llm=True,
+    )
+    return {
+        "ok": True,
+        "proposal": record,
+        "trace": trace,
+        "markdown": markdown,
+        "matches": context["matches"],
+        "history_item": history_item,
+    }
+
+
+def handle_coding_apply(payload: dict[str, Any]) -> dict[str, Any]:
+    proposal_id = str(payload.get("proposal_id") or "")
+    record = apply_proposal(PROPOSAL_DIR, BACKUP_DIR, proposal_id)
+    with CACHE_LOCK:
+        ANALYSIS_CACHE.pop(str(Path(record["project_path"]).resolve()), None)
+    return {
+        "ok": True,
+        "proposal": record,
+        "markdown": (
+            f"# 补丁已应用\n\n已修改 {len(record.get('files', []))} 个文件。\n\n"
+            "建议现在切换到项目诊断执行构建和测试。\n"
+        ),
+    }
+
+
+def handle_coding_rollback(payload: dict[str, Any]) -> dict[str, Any]:
+    proposal_id = str(payload.get("proposal_id") or "")
+    record = rollback_proposal(PROPOSAL_DIR, proposal_id)
+    with CACHE_LOCK:
+        ANALYSIS_CACHE.pop(str(Path(record["project_path"]).resolve()), None)
+    return {
+        "ok": True,
+        "proposal": record,
+        "markdown": "# 修改已回滚\n\n相关文件已经恢复到应用补丁之前的状态。\n",
+    }
+
+
 def handle_ask(
     payload: dict[str, Any],
     progress: ProgressCallback = noop_progress,
@@ -458,8 +601,6 @@ def handle_diagnose(
     ).expanduser().resolve()
     skip_all = mode == "dry"
     cmake_args = list(payload.get("cmake_args") or [])
-    if mode == "build-test" and not cmake_args:
-        cmake_args = ["-DMINIREDIS_ENABLE_INTEGRATION_TESTS=OFF"]
     progress(8, "正在准备诊断任务")
     result = run_diagnostics(
         project_path=project_path,
@@ -537,6 +678,7 @@ def handle_ast(
 ACTION_HANDLERS: dict[str, ActionHandler] = {
     "analyze": handle_analyze,
     "agent": handle_agent,
+    "coding": handle_coding,
     "ask": handle_ask,
     "diagnose": handle_diagnose,
     "ast": handle_ast,
@@ -660,16 +802,23 @@ JOB_MANAGER = JobManager()
 
 
 class WebUIHandler(BaseHTTPRequestHandler):
-    server_version = "ProjectAgentCppWeb/0.2.1"
+    server_version = "ProjectAgentCppWeb/0.3.0"
 
     def do_GET(self) -> None:
         path = unquote(urlsplit(self.path).path)
         try:
             if path == "/api/health":
-                json_response(self, {"ok": True, "root": str(ROOT), "version": "0.2.1"})
+                json_response(self, {"ok": True, "root": str(ROOT), "version": "0.3.0"})
                 return
             if path == "/api/history":
                 json_response(self, {"ok": True, "items": list_history()})
+                return
+            proposal_match = re.fullmatch(r"/api/coding/proposals/([a-f0-9]{32})", path)
+            if proposal_match:
+                json_response(
+                    self,
+                    {"ok": True, "proposal": load_proposal(PROPOSAL_DIR, proposal_match.group(1))},
+                )
                 return
             if path.startswith("/api/history/"):
                 json_response(self, load_history(path.rsplit("/", 1)[-1]))
@@ -698,6 +847,12 @@ class WebUIHandler(BaseHTTPRequestHandler):
                     raise ValueError("Job payload must be an object.")
                 job = JOB_MANAGER.start(action, action_payload)
                 json_response(self, {"ok": True, "job": job.public()}, status=202)
+                return
+            if path == "/api/coding/apply":
+                json_response(self, handle_coding_apply(payload))
+                return
+            if path == "/api/coding/rollback":
+                json_response(self, handle_coding_rollback(payload))
                 return
             cancel_match = re.fullmatch(r"/api/jobs/([A-Za-z0-9_-]+)/cancel", path)
             if cancel_match:

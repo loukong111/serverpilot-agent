@@ -1,5 +1,7 @@
 const state = {
   activeJobId: null,
+  activeProposal: null,
+  busy: false,
   lastJson: {},
   lastMarkdown: "",
   talkScripts: {},
@@ -13,9 +15,11 @@ function setStatus(text) {
 }
 
 function setBusy(busy) {
-  ["analyzeBtn", "agentBtn", "diagnoseBtn", "astBtn", "askBtn", "clearBtn"].forEach((id) => {
+  state.busy = busy;
+  ["analyzeBtn", "agentBtn", "codingBtn", "diagnoseBtn", "astBtn", "askBtn", "clearBtn"].forEach((id) => {
     $(id).disabled = busy;
   });
+  updateProposalActions();
 }
 
 function escapeHtml(value) {
@@ -190,6 +194,53 @@ function renderTrace(trace) {
     .join("");
 }
 
+function renderDiff(patch) {
+  const content = String(patch || "");
+  const output = $("diffOutput");
+  if (!content) {
+    output.classList.add("empty-state");
+    output.textContent = "等待 Coding Agent 生成候选补丁";
+    return;
+  }
+  output.classList.remove("empty-state");
+  output.innerHTML = content
+    .split("\n")
+    .map((line) => {
+      let className = "diff-context";
+      if (line.startsWith("diff --git") || line.startsWith("@@")) className = "diff-header";
+      else if (line.startsWith("+") && !line.startsWith("+++")) className = "diff-add";
+      else if (line.startsWith("-") && !line.startsWith("---")) className = "diff-remove";
+      return `<span class="${className}">${escapeHtml(line)}</span>`;
+    })
+    .join("\n");
+}
+
+function updateProposalActions() {
+  const status = state.activeProposal?.status;
+  $("applyPatchBtn").disabled = state.busy || status !== "pending";
+  $("rollbackPatchBtn").disabled = state.busy || status !== "applied";
+  $("verifyPatchBtn").disabled = state.busy || status !== "applied";
+}
+
+function renderProposal(proposal) {
+  state.activeProposal = proposal || null;
+  $("proposalToolbar").hidden = !proposal;
+  if (!proposal) {
+    $("proposalStatus").textContent = "等待修改方案";
+    renderDiff("");
+    updateProposalActions();
+    return;
+  }
+  const labels = {
+    pending: "候选补丁待审核",
+    applied: "补丁已应用，可构建测试或回滚",
+    rolled_back: "补丁已回滚",
+  };
+  $("proposalStatus").textContent = labels[proposal.status] || proposal.status;
+  renderDiff(proposal.patch);
+  updateProposalActions();
+}
+
 async function requestJson(url, options = {}) {
   const response = await fetch(url, options);
   const text = await response.text();
@@ -233,6 +284,18 @@ function analysisPayload() {
     ...llmPayload(),
     use_llm: $("useLlm").checked,
     style: $("reportStyle").value,
+  };
+}
+
+function codingPayload() {
+  const task = $("codingTask").value.trim();
+  if (!task) throw new Error("请输入代码修改任务");
+  return {
+    ...projectPayload(),
+    task,
+    model: $("codingModelName").value.trim() || $("modelName").value.trim(),
+    api_key: $("codingApiKey").value.trim() || $("apiKey").value.trim(),
+    base_url: $("codingBaseUrl").value.trim() || $("baseUrl").value.trim(),
   };
 }
 
@@ -295,6 +358,13 @@ function applyJobResult(action, result) {
     renderTrace(result.trace);
     setJson({ analysis: result.analysis, trace: result.trace });
     showOutputView("traceView");
+  } else if (action === "coding") {
+    renderTalkScripts({});
+    renderProposal(result.proposal);
+    setReport(result.markdown);
+    renderTrace(result.trace);
+    setJson({ proposal: result.proposal, matches: result.matches, trace: result.trace });
+    showOutputView("diffView");
   } else if (action === "ask") {
     renderTalkScripts({});
     setReport(`${notice}${result.markdown}`);
@@ -355,6 +425,7 @@ async function runJob(action, payload, label) {
 const historyLabels = {
   analyze: "项目分析",
   agent: "Agent Trace",
+  coding: "代码修改方案",
   ask: "面试问答",
   diagnose: "项目诊断",
   ast: "Clang AST",
@@ -408,6 +479,17 @@ async function openHistory(itemId) {
     renderTalkScripts(scripts);
     if (data.item.action === "agent") {
       renderTrace(data.data.trace);
+    } else if (data.item.action === "coding") {
+      let proposal = data.data.proposal;
+      try {
+        const current = await requestJson(`/api/coding/proposals/${encodeURIComponent(proposal.id)}`);
+        proposal = current.proposal;
+      } catch (_error) {
+        // The history snapshot remains readable if proposal storage was cleaned.
+      }
+      renderProposal(proposal);
+      renderTrace(data.data.trace);
+      showOutputView("diffView");
     }
     setStatus("历史记录已打开");
   } catch (error) {
@@ -421,12 +503,21 @@ function clearOutput() {
   $("reportOutput").textContent = "等待分析结果";
   $("traceOutput").classList.add("empty-state");
   $("traceOutput").textContent = "等待 Agent Trace";
+  renderProposal(null);
   renderTalkScripts({});
   $("jsonOutput").textContent = "{}";
   setStatus("就绪");
 }
 
-const preferenceIds = ["projectPath", "modelName", "baseUrl", "reportStyle", "useLlm"];
+const preferenceIds = [
+  "projectPath",
+  "modelName",
+  "baseUrl",
+  "reportStyle",
+  "useLlm",
+  "codingModelName",
+  "codingBaseUrl",
+];
 
 function savePreferences() {
   const values = {};
@@ -461,6 +552,10 @@ function startAction(action, payloadFactory, label) {
 }
 
 $("analyzeBtn").addEventListener("click", () => startAction("analyze", analysisPayload, "项目分析"));
+
+$("codingBtn").addEventListener("click", () =>
+  startAction("coding", codingPayload, "代码修改方案"),
+);
 
 $("agentBtn").addEventListener("click", () =>
   startAction(
@@ -497,6 +592,52 @@ $("diagnoseBtn").addEventListener("click", () => {
 });
 
 $("astBtn").addEventListener("click", () => startAction("ast", astPayload, "Clang AST"));
+
+$("applyPatchBtn").addEventListener("click", async () => {
+  const proposal = state.activeProposal;
+  if (!proposal || proposal.status !== "pending") return;
+  if (!window.confirm(`确认应用补丁并修改 ${proposal.files.length} 个文件吗？`)) return;
+  setBusy(true);
+  setStatus("正在应用补丁");
+  try {
+    const result = await postJson("/api/coding/apply", { proposal_id: proposal.id });
+    renderProposal(result.proposal);
+    setReport(result.markdown);
+    setJson({ proposal: result.proposal });
+    setStatus("补丁已应用");
+  } catch (error) {
+    setStatus("补丁应用失败");
+    setReport(`# 补丁应用失败\n\n- ${error.message}`);
+  } finally {
+    setBusy(false);
+  }
+});
+
+$("rollbackPatchBtn").addEventListener("click", async () => {
+  const proposal = state.activeProposal;
+  if (!proposal || proposal.status !== "applied") return;
+  if (!window.confirm("确认恢复补丁应用前的文件状态吗？")) return;
+  setBusy(true);
+  setStatus("正在回滚修改");
+  try {
+    const result = await postJson("/api/coding/rollback", { proposal_id: proposal.id });
+    renderProposal(result.proposal);
+    setReport(result.markdown);
+    setJson({ proposal: result.proposal });
+    setStatus("修改已回滚");
+  } catch (error) {
+    setStatus("回滚失败");
+    setReport(`# 回滚失败\n\n- ${error.message}`);
+  } finally {
+    setBusy(false);
+  }
+});
+
+$("verifyPatchBtn").addEventListener("click", () => {
+  $("diagnoseMode").value = "build-test";
+  showWorkflow("diagnosisPanel");
+  startAction("diagnose", diagnosePayload, "构建测试");
+});
 
 $("cancelBtn").addEventListener("click", async () => {
   if (!state.activeJobId) return;
