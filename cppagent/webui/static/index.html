@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ProjectAgentCpp</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <aside class="sidebar">
+        <header class="brand">
+          <div class="brand-mark">P</div>
+          <div>
+            <h1>ProjectAgentCpp</h1>
+            <p>C++ Project Agent</p>
+          </div>
+        </header>
+
+        <section class="control-panel">
+          <label for="projectPath">Project Path</label>
+          <input id="projectPath" value="/home/wcl/project/miniredis" spellcheck="false" />
+
+          <div class="llm-box">
+            <label class="check-row">
+              <input id="useLlm" type="checkbox" checked />
+              <span>LLM 报告</span>
+            </label>
+            <label for="modelName">Model</label>
+            <input id="modelName" placeholder="PROJECTAGENTCPP_MODEL / OPENAI_MODEL" spellcheck="false" />
+            <label for="apiKey">API Key</label>
+            <input id="apiKey" type="password" placeholder="OPENAI_API_KEY" spellcheck="false" />
+            <label for="baseUrl">Base URL</label>
+            <input id="baseUrl" value="https://api.openai.com/v1" spellcheck="false" />
+            <label for="reportStyle">Report Style</label>
+            <select id="reportStyle">
+              <option value="interview">面试强化</option>
+              <option value="resume">简历强化</option>
+              <option value="deep">深挖问题</option>
+            </select>
+          </div>
+
+          <div class="mode-grid" role="group" aria-label="Actions">
+            <button id="analyzeBtn" class="primary">分析</button>
+            <button id="agentBtn">Trace</button>
+            <button id="diagnoseBtn">诊断</button>
+            <button id="astBtn">AST</button>
+          </div>
+        </section>
+
+        <section class="control-panel compact">
+          <label for="question">Interview Question</label>
+          <textarea id="question" rows="4">这个项目最能体现你 C++ 能力的地方是什么？</textarea>
+          <label class="check-row inline">
+            <input id="askUseLlm" type="checkbox" />
+            <span>LLM 问答</span>
+          </label>
+          <button id="askBtn" class="wide">问答</button>
+        </section>
+
+        <section class="control-panel compact">
+          <label for="diagnoseMode">Diagnose Mode</label>
+          <select id="diagnoseMode">
+            <option value="dry">dry</option>
+            <option value="build-test">build-test</option>
+          </select>
+          <details class="advanced">
+            <summary>诊断参数</summary>
+            <label for="cmakeArgs">CMake Args</label>
+            <input id="cmakeArgs" value="-DMINIREDIS_ENABLE_INTEGRATION_TESTS=OFF" spellcheck="false" />
+            <label for="buildArgs">Build Args</label>
+            <input id="buildArgs" placeholder="--parallel 4" spellcheck="false" />
+            <label for="ctestArgs">CTest Args</label>
+            <input id="ctestArgs" placeholder="-R miniredis_unit_tests" spellcheck="false" />
+            <label for="startCommand">Start Command</label>
+            <input id="startCommand" placeholder="./build/miniredis --config config/miniredis.conf" spellcheck="false" />
+            <label for="benchmarkCommand">Benchmark Command</label>
+            <input id="benchmarkCommand" placeholder="redis-cli -p 6379 ping" spellcheck="false" />
+            <label for="statsUrl">Stats URL</label>
+            <input id="statsUrl" placeholder="http://127.0.0.1:8080/stats" spellcheck="false" />
+            <label for="diagnoseTimeout">Timeout</label>
+            <input id="diagnoseTimeout" type="number" value="180" min="1" />
+          </details>
+        </section>
+
+        <section class="control-panel compact">
+          <label for="compileDb">AST Compile DB</label>
+          <input id="compileDb" placeholder="/path/to/compile_commands.json" spellcheck="false" />
+          <label for="astJson">Existing AST JSON</label>
+          <input id="astJson" placeholder="examples/sample_ast.json" spellcheck="false" />
+          <div class="small-grid">
+            <label>
+              <span>Max Files</span>
+              <input id="astMaxFiles" type="number" value="3" min="1" />
+            </label>
+            <label>
+              <span>Timeout</span>
+              <input id="astTimeout" type="number" value="60" min="1" />
+            </label>
+          </div>
+          <label for="clangBin">Clang Bin</label>
+          <input id="clangBin" value="clang++" spellcheck="false" />
+        </section>
+
+        <section class="control-panel compact">
+          <button id="clearBtn" class="wide">清空</button>
+          <p class="hint" id="statusText">Ready</p>
+        </section>
+      </aside>
+
+      <section class="workspace">
+        <nav class="tabs" aria-label="Output Views">
+          <button class="tab active" data-view="reportView">Report</button>
+          <button class="tab" data-view="traceView">Trace</button>
+          <button class="tab" data-view="jsonView">JSON</button>
+        </nav>
+
+        <section id="reportView" class="view active">
+          <section id="talkPanel" class="talk-panel hidden">
+            <div class="talk-header">
+              <div>
+                <p class="eyebrow">Interview Talk</p>
+                <h2>面试讲法</h2>
+              </div>
+              <label class="select-label" for="talkDuration">
+                <span>时长</span>
+                <select id="talkDuration">
+                  <option value="30s">30 秒</option>
+                  <option value="1min">1 分钟</option>
+                  <option value="2min">2 分钟</option>
+                </select>
+              </label>
+            </div>
+            <p id="talkOutput" class="talk-output"></p>
+          </section>
+          <div id="reportOutput" class="markdown empty-state">等待分析结果</div>
+        </section>
+
+        <section id="traceView" class="view">
+          <div id="traceOutput" class="trace empty-state">等待 Agent Trace</div>
+        </section>
+
+        <section id="jsonView" class="view">
+          <pre id="jsonOutput" class="json-view">{}</pre>
+        </section>
+      </section>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

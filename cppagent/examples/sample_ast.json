@@ -1,0 +1,33 @@
+{
+  "kind": "TranslationUnitDecl",
+  "inner": [
+    {
+      "kind": "CXXRecordDecl",
+      "name": "DemoServer",
+      "loc": {
+        "file": "demo.cpp",
+        "line": 3
+      }
+    },
+    {
+      "kind": "FunctionDecl",
+      "name": "main",
+      "loc": {
+        "file": "demo.cpp",
+        "line": 8
+      },
+      "inner": [
+        {
+          "kind": "CallExpr",
+          "loc": {
+            "file": "demo.cpp",
+            "line": 10
+          },
+          "referencedDecl": {
+            "name": "start"
+          }
+        }
+      ]
+    }
+  ]
+}

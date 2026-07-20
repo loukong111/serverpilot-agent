@@ -1,0 +1,12 @@
+build/
+cmake-build*/
+__pycache__/
+*.pyc
+reports/*.json
+reports/*.md
+reports/**/*.json
+reports/**/*.md
+reports/diagnostics/builds/
+reports/web/
+reports/ast/dumps/
+!reports/.gitkeep
