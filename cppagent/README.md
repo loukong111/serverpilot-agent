@@ -1,21 +1,21 @@
 # ProjectAgentCpp
 
-ProjectAgentCpp is a hybrid C++ and Python coding agent for analyzing C++ server-side projects.
+ProjectAgentCpp 是一个由 C++ 和 Python 共同实现的 Coding Agent，专门用于分析 C++ 服务端项目。
 
-The first version follows a simple boundary:
+项目采用清晰的职责划分：
 
-- C++ Analyzer extracts deterministic project facts.
-- Python Agent orchestrates the analyzer and generates a Markdown report.
+- C++ Analyzer 负责提取稳定、可验证的项目事实。
+- Python Agent 负责任务编排、LLM 接入和 Markdown 报告生成。
 
-The target projects are C++ service projects such as MiniRedis and CorpCron.
+目标分析对象包括 MiniRedis、CorpCron 等 C++ 服务端项目。
 
-## Features
+## 功能
 
-- Scan common C++ project directories: `src`, `include`, `tests`, `docs`, `config`, `scripts`
-- Read and summarize root `CMakeLists.txt`
-- Detect CMake targets, C++ standard, test entries, packages, and linked libraries
-- Count source, header, CMake, Markdown, and test-related files
-- Detect common service-side modules by rules:
+- 扫描常见 C++ 项目目录：`src`、`include`、`tests`、`docs`、`config`、`scripts`
+- 读取并分析根目录的 `CMakeLists.txt`
+- 识别 CMake targets、C++ standard、测试入口、依赖包和 linked libraries
+- 统计 source、header、CMake、Markdown 和测试相关文件
+- 根据规则识别常见服务端模块：
   - network
   - protocol
   - storage
@@ -26,10 +26,14 @@ The target projects are C++ service projects such as MiniRedis and CorpCron.
   - metrics
   - config
   - testing
-- Generate JSON facts and a Chinese Markdown report
-- Produce architecture, strengths, risks, and interview talking points
+- 生成结构化 JSON 和中文 Markdown 报告
+- 分析项目架构、技术亮点、潜在风险和改进方向
+- 生成面试讲法、简历表达和面试问答
+- 执行构建、测试、服务启动、benchmark 和 stats 诊断
+- 读取 `compile_commands.json`，提取类、函数、调用线索和模块依赖
+- 提供本地 Web UI，支持完整功能演示
 
-## Layout
+## 目录结构
 
 ```text
 projectagentcpp/
@@ -38,113 +42,132 @@ projectagentcpp/
 │   ├── include/projectagentcpp/
 │   └── src/
 ├── agent/
-│   └── project_agent/
+│   ├── project_agent/
+│   └── prompts/
+├── webui/
+│   ├── server.py
+│   └── static/
+├── scripts/
+├── tests/
+├── examples/
 ├── reports/
 └── README.md
 ```
 
-## Build The C++ Analyzer
+## 构建 C++ Analyzer
 
 ```bash
 cmake -S . -B build
 cmake --build build
 ```
 
-Run the analyzer directly:
+直接运行 Analyzer：
 
 ```bash
 ./build/cpp_analyzer analyze /home/wcl/project/miniredis
 ```
 
-Write JSON to a file:
+将 JSON 写入文件：
 
 ```bash
 ./build/cpp_analyzer analyze /home/wcl/project/miniredis --json reports/miniredis.json
 ```
 
-## Run The C++ Agent Runtime
+## 运行 C++ Agent Runtime
 
-Phase 2 adds a lightweight C++ Agent Runtime. It plans a fixed project-analysis workflow, executes registered tools, and writes a step trace.
+C++ Agent Runtime 提供 `Tool`、`ToolRegistry`、`Planner` 和 `Executor`。Planner 会根据任务内容选择需要执行的 Tool，Executor 负责依次执行并记录 Trace。
 
 ```bash
 ./build/cpp_analyzer agent /home/wcl/project/miniredis \
+  --task "分析项目架构、核心模块和代码符号" \
   --json reports/miniredis_agent.json \
   --trace reports/miniredis_trace.json
 ```
 
-The runtime currently executes these tools:
+例如，只分析 CMake 时会跳过 source 和 symbol 分析；执行完整项目分析或面试准备任务时，会运行完整 Tool 链路。
+
+完整分析通常包含以下步骤：
 
 ```text
-scan_project -> analyze_cmake -> analyze_sources -> evaluate_project -> generate_json
+scan_project -> analyze_cmake -> analyze_sources -> analyze_symbols -> evaluate_project -> generate_json
 ```
 
-The trace records:
+Trace 会记录：
 
-- tool name
-- success/failure
-- duration in milliseconds
-- observation text
+- Tool 名称
+- success 或 failure 状态
+- 执行耗时，单位为毫秒
+- observation 文本
 
-## Run The Python Agent
+## 运行 Python Agent
 
-The Python layer can build the C++ analyzer and generate both Markdown and JSON:
+Python 层可以构建 C++ Analyzer，并生成 Markdown 和 JSON：
 
 ```bash
 python3 -m agent.project_agent.cli analyze /home/wcl/project/miniredis --build
 ```
 
-Default outputs:
+默认输出：
 
 ```text
 reports/<project_name>_analysis.md
 reports/<project_name>_analysis.json
 ```
 
-Generate an offline interview answer:
+生成离线面试回答：
 
 ```bash
 python3 -m agent.project_agent.cli ask /home/wcl/project/miniredis \
   --question "这个项目最能体现你 C++ 能力的地方是什么？"
 ```
 
-## Local Web UI
+## 本地 Web UI
 
-The Web UI runs locally with Python standard library only:
+Web UI 只依赖 Python standard library，不需要额外安装 Web framework。
+
+启动方式：
 
 ```bash
 python3 webui/server.py --host 127.0.0.1 --port 8765
 ```
 
-Or use the helper script:
+也可以使用启动脚本：
 
 ```bash
 ./scripts/start_webui.sh
 ```
 
-Open:
+浏览器访问：
 
 ```text
 http://127.0.0.1:8765
 ```
 
-The UI supports:
+Web UI 支持：
 
-- project analysis
-- LLM-generated reports with style selection
-- Agent trace
-- offline or LLM interview Q&A
-- dry or build-test diagnosis with custom CMake/build/ctest args
-- optional service start command, benchmark command, and stats URL
-- optional Clang AST analysis or existing AST JSON parsing
-- Markdown, JSON, and trace views
+- 项目分析、面试准备和项目诊断三个独立工作区
+- 离线报告和 LLM 报告
+- 报告风格选择
+- Task-aware Agent Trace
+- 离线或 LLM 面试问答
+- dry 或 build-test 诊断模式
+- 自定义 CMake、build 和 ctest 参数
+- 可选的服务启动命令、benchmark 命令和 stats URL
+- Clang AST 分析或已有 AST JSON 解析
+- Markdown、Trace 和 JSON 视图
+- 后台任务进度、运行日志和取消操作
+- 带时间戳的报告历史和结果恢复
 
-Generated Web UI reports are written under:
+Web UI 生成的报告位于：
 
 ```text
 reports/web/
+reports/web/history/
 ```
 
-For LLM reports and LLM interview Q&A, either set environment variables before starting:
+`reports/web/` 保存最新结果，`reports/web/history/` 保存每次成功运行的历史结果。
+
+使用 LLM 报告和 LLM 面试问答时，可以在启动前设置环境变量：
 
 ```bash
 export OPENAI_API_KEY=...
@@ -152,22 +175,40 @@ export PROJECTAGENTCPP_MODEL=your-model-name
 python3 webui/server.py --host 127.0.0.1 --port 8765
 ```
 
-Or enter the API key, model, and base URL directly in the Web UI. The API key is sent only to the local server for the current request and is not written to project files.
+也可以直接在 Web UI 中填写 API Key、model 和 Base URL。API Key 只会发送到本地 Server，用于当前请求，不会写入项目文件或历史记录。
 
-The Web UI keeps analyzer facts stable and asks the LLM to vary only the wording, emphasis, and report style.
+Analyzer 负责提供稳定事实，LLM 只调整报告的表达方式、重点和风格，不负责修改分析事实。
 
-## LLM Integration
+如果缺少 LLM 配置，或者 OpenAI-compatible endpoint 暂时不可用，项目分析和面试问答会自动回退到离线结果，不会丢弃已经完成的 Analyzer 数据。回退原因会显示在任务日志和报告中。
 
-Phase 3 adds an OpenAI-compatible LLM client and prompt templates. The analyzer still produces deterministic JSON first; the LLM only rewrites that JSON into a richer report or interview answer.
+## 测试
 
-Set a model and API key:
+运行 Python regression tests：
+
+```bash
+python3 -m unittest discover -s tests -v
+```
+
+Web UI 启动后，可以运行完整 API smoke tests：
+
+```bash
+python3 tests/smoke_webui.py --base-url http://127.0.0.1:8765
+```
+
+smoke tests 会验证项目分析、LLM 回退、面试问答、Agent Trace、诊断、AST、历史记录和错误处理。
+
+## LLM 接入
+
+Python 层提供 OpenAI-compatible `LLMClient` 和 Prompt templates。Analyzer 会先生成稳定 JSON，LLM 再根据 JSON 生成更完整的项目报告或面试回答。
+
+设置 model 和 API Key：
 
 ```bash
 export OPENAI_API_KEY=...
 export PROJECTAGENTCPP_MODEL=your-model-name
 ```
 
-Generate an LLM report:
+生成 LLM 报告：
 
 ```bash
 python3 -m agent.project_agent.cli analyze /home/wcl/project/miniredis \
@@ -176,7 +217,7 @@ python3 -m agent.project_agent.cli analyze /home/wcl/project/miniredis \
   --save-prompt reports/miniredis_report_prompt.txt
 ```
 
-Ask an LLM-powered interview question:
+使用 LLM 回答面试问题：
 
 ```bash
 python3 -m agent.project_agent.cli ask /home/wcl/project/miniredis \
@@ -185,13 +226,13 @@ python3 -m agent.project_agent.cli ask /home/wcl/project/miniredis \
   --output reports/miniredis_llm_answer.md
 ```
 
-If you use another OpenAI-compatible endpoint:
+使用其他 OpenAI-compatible endpoint：
 
 ```bash
 export PROJECTAGENTCPP_BASE_URL=https://your-endpoint.example/v1
 ```
 
-Prompt templates live in:
+Prompt templates 位于：
 
 ```text
 agent/prompts/system.md
@@ -199,11 +240,11 @@ agent/prompts/report.md
 agent/prompts/interview_qa.md
 ```
 
-## Service Diagnosis
+## 服务诊断
 
-Phase 4 adds a service diagnosis workflow. It can configure, build, test, optionally start a service, run a benchmark command, fetch a stats endpoint, and write a Markdown/JSON diagnostic report.
+服务诊断流程可以执行 CMake configure、build 和 ctest，还可以选择启动服务、运行 benchmark、读取 stats endpoint，并生成 Markdown 和 JSON 诊断报告。
 
-Basic CMake build and test:
+执行基础 CMake build 和 test：
 
 ```bash
 python3 -m agent.project_agent.cli diagnose /home/wcl/project/miniredis \
@@ -211,7 +252,7 @@ python3 -m agent.project_agent.cli diagnose /home/wcl/project/miniredis \
   --timeout 180
 ```
 
-Lightweight dry run that only creates a report skeleton:
+只生成诊断框架，不执行 configure、build 和 test：
 
 ```bash
 python3 -m agent.project_agent.cli diagnose /home/wcl/project/miniredis \
@@ -220,7 +261,7 @@ python3 -m agent.project_agent.cli diagnose /home/wcl/project/miniredis \
   --skip-test
 ```
 
-Run a service workflow:
+执行服务诊断流程：
 
 ```bash
 python3 -m agent.project_agent.cli diagnose /home/wcl/project/miniredis \
@@ -232,23 +273,25 @@ python3 -m agent.project_agent.cli diagnose /home/wcl/project/miniredis \
   --skip-test
 ```
 
-Default outputs:
+默认输出：
 
 ```text
 reports/diagnostics/<project_name>_diagnostic.md
 reports/diagnostics/<project_name>_diagnostic.json
 ```
 
+如果 configure 失败，后续 build 和 test 会自动跳过，避免产生重复错误。Web UI 中的长任务支持取消。
+
 ## Clang Enhanced Analysis
 
-Phase 5 reads `compile_commands.json` from common CMake build directories and adds code-level analysis data to the analyzer JSON.
+C++ Analyzer 会从常见 CMake build 目录中读取 `compile_commands.json`，并将代码级分析结果写入 JSON。
 
 ```bash
 ./build/cpp_analyzer analyze /home/wcl/project/miniredis \
   --json reports/miniredis_phase5.json
 ```
 
-The JSON contains a `clang` section:
+JSON 中的 `clang` 字段包含：
 
 ```text
 clang.compile_commands_found
@@ -259,17 +302,17 @@ clang.calls
 clang.module_dependencies
 ```
 
-The C++ Agent Runtime also includes this step:
+C++ Agent Runtime 中对应的完整步骤为：
 
 ```text
 scan_project -> analyze_cmake -> analyze_sources -> analyze_symbols -> evaluate_project -> generate_json
 ```
 
-The current implementation is intentionally lightweight: it uses `compile_commands.json` plus source rules to extract class/function/call hints and include-based module dependencies. A future version can replace the rule extractor with libclang or Clang tooling while keeping the same JSON contract.
+当前实现采用轻量方案，通过 `compile_commands.json` 和 source rules 提取 class、function、call 线索以及基于 include 的 module dependencies。后续可以替换为 libclang 或 Clang tooling，同时保持现有 JSON contract 不变。
 
-## Optional Clang AST Backend
+## 可选 Clang AST Backend
 
-An optional Python AST command is available for environments with `clang++`.
+在安装了 `clang++` 的环境中，可以使用 Python AST command：
 
 ```bash
 python3 -m agent.project_agent.cli ast /home/wcl/project/miniredis \
@@ -277,7 +320,7 @@ python3 -m agent.project_agent.cli ast /home/wcl/project/miniredis \
   --max-files 3
 ```
 
-Default outputs:
+默认输出：
 
 ```text
 reports/ast/<project_name>_ast.md
@@ -285,74 +328,82 @@ reports/ast/<project_name>_ast.json
 reports/ast/dumps/<project_name>/*.ast.json
 ```
 
-If `clang++` is not installed, the command still writes a diagnostic report explaining that the AST backend is unavailable. You can also parse an existing AST dump:
+如果没有安装 `clang++`，command 仍会生成诊断报告并说明 AST Backend 不可用。也可以直接解析已有 AST JSON：
 
 ```bash
 python3 -m agent.project_agent.cli ast /home/wcl/project/miniredis \
   --ast-json /path/to/file.ast.json
 ```
 
-A tiny offline sample is included:
+项目包含一个离线示例：
 
 ```bash
 python3 -m agent.project_agent.cli ast /home/wcl/project/miniredis \
   --ast-json examples/sample_ast.json
 ```
 
-This keeps the project usable on machines without Clang while making the true AST path ready for later.
+这样可以保证没有安装 Clang 时项目仍然可用，同时为后续接入真实 AST 分析保留扩展路径。
 
-## Design
+## 设计思路
 
-The project is intentionally split into two parts:
+项目分为两个主要部分：
 
-- C++ is responsible for fast, deterministic, local analysis.
-- Python is responsible for agent orchestration, report generation, and future LLM integration.
+- C++ 负责快速、稳定、可离线运行的本地分析。
+- Python 负责 Agent 编排、报告生成、服务诊断和 LLM 接入。
 
-This keeps facts and language generation separate. The analyzer can work offline, while the Python layer can later call an LLM using the JSON result as structured context.
+这种设计将事实提取和语言生成分开。Analyzer 可以完全离线运行，Python Agent 则可以将 JSON 作为结构化上下文交给 LLM。
 
-## Roadmap
+## 开发路线
 
-1. Pure C++ offline analysis
-   - CLI
-   - project scanning
-   - CMake parsing
-   - source keyword analysis
-   - JSON output
-   - Markdown report through Python
+### 第一阶段：纯 C++ 离线分析
 
-2. Agent runtime
-   - Tool abstraction
-   - Tool registry
-   - planner/executor loop
-   - tool observations
+- CLI
+- 项目扫描
+- CMake 解析
+- source keyword 分析
+- JSON 输出
+- 通过 Python 生成 Markdown 报告
 
-Current status: implemented as a C++ runtime inside `cpp_analyzer`, with `Tool`, `ToolRegistry`, `Planner`, `Executor`, `AgentRun`, and JSON trace output.
+当前状态：已完成。
 
-3. LLM integration
-   - LLM client
-   - prompt templates
-   - report generation from JSON facts
-   - interview Q&A
+### 第二阶段：Agent Runtime
 
-Current status: implemented in Python with `LLMClient`, Markdown prompt templates, `analyze --llm`, and `ask --llm`. Offline report and Q&A remain available without an API key.
+- Tool abstraction
+- ToolRegistry
+- Planner 和 Executor
+- 多步骤 Trace
+- Tool observation
 
-4. C++ service diagnosis
-   - build project
-   - run tests
-   - start service
-   - benchmark
-   - analyze logs and stats
+当前状态：已完成。C++ Runtime 已包含 `Tool`、`ToolRegistry`、`Planner`、`Executor` 和 `AgentRun`，Planner 会根据任务内容选择 Tool。
 
-Current status: implemented in Python as `diagnose`, with CMake configure/build, ctest, optional service startup, optional benchmark command, optional stats fetch, Markdown report, JSON result, and heuristic suggestions.
+### 第三阶段：LLM 接入
 
-5. Clang enhancement
-   - read `compile_commands.json`
-   - extract classes and functions
-   - build module dependency graph
-   - improve module confidence
+- LLMClient
+- Prompt templates
+- 根据 JSON 生成报告
+- 面试问答
 
-Current status: implemented as a lightweight C++ enhancement that reads common `compile_commands.json` locations, extracts class/function/call hints by source rules, and emits module dependency edges from include relationships. This is the bridge toward a future libclang/Clang AST implementation.
+当前状态：已完成。Python 提供 `LLMClient`、Markdown Prompt templates、`analyze --llm` 和 `ask --llm`，没有 API Key 时仍可使用离线报告和问答。
 
-## Example Positioning
+### 第四阶段：C++ 服务端项目诊断
 
-> ProjectAgentCpp is a C++ static analysis engine plus Python agent orchestrator. It analyzes C++ server projects, extracts structured facts from CMake and source files, then generates architecture summaries, highlights, risks, and interview talking points.
+- build project
+- run tests
+- start service
+- benchmark
+- 分析 logs 和 stats
+
+当前状态：已完成。`diagnose` 支持 CMake configure、build、ctest、服务启动、benchmark、stats 获取、Markdown/JSON 报告和诊断建议。
+
+### 第五阶段：Clang 增强
+
+- 读取 `compile_commands.json`
+- 提取 class 和 function
+- 构建 module dependency graph
+- 提高 module confidence
+
+当前状态：已完成轻量版本。C++ Analyzer 会读取常见位置的 `compile_commands.json`，通过 source rules 提取 class、function、call 线索，并根据 include 关系生成 module dependency edges。Python 层另外提供可选 Clang AST Backend。
+
+## 项目介绍参考
+
+> ProjectAgentCpp 是一个由 C++ static analysis engine 和 Python Agent orchestrator 组成的 C++ 项目分析工具。它可以扫描 C++ 服务端项目，从 CMake 和 source files 中提取结构化事实，再生成架构总结、技术亮点、潜在风险、改进建议和面试讲法。

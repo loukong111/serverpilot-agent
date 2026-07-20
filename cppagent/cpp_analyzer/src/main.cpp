@@ -13,7 +13,7 @@ void printUsage() {
         << "Usage:\n"
         << "  cpp_analyzer analyze <project_path> [--json <output_file>]\n"
         << "  cpp_analyzer scan <project_path> [--json <output_file>]\n"
-        << "  cpp_analyzer agent <project_path> [--json <output_file>] [--trace <trace_file>]\n";
+        << "  cpp_analyzer agent <project_path> [--task <task>] [--json <output_file>] [--trace <trace_file>]\n";
 }
 
 }  // namespace
@@ -33,12 +33,15 @@ int main(int argc, char** argv) {
     const std::filesystem::path project_path = argv[2];
     std::string output_path;
     std::string trace_path;
+    std::string task = "Analyze C++ project";
     for (int i = 3; i < argc; ++i) {
         const std::string arg = argv[i];
         if (arg == "--json" && i + 1 < argc) {
             output_path = argv[++i];
         } else if (arg == "--trace" && i + 1 < argc) {
             trace_path = argv[++i];
+        } else if (arg == "--task" && i + 1 < argc) {
+            task = argv[++i];
         } else {
             std::cerr << "Unknown argument: " << arg << "\n";
             printUsage();
@@ -54,7 +57,7 @@ int main(int argc, char** argv) {
 
     std::string json;
     if (command == "agent") {
-        const auto run = projectagentcpp::runAgentAnalysis(project_path);
+        const auto run = projectagentcpp::runAgentAnalysis(project_path, task);
         json = run.final_json.empty() ? projectagentcpp::toJson(run.analysis) : run.final_json;
         if (!trace_path.empty()) {
             std::ofstream trace_output(trace_path);

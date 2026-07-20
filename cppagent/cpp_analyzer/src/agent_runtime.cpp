@@ -5,6 +5,7 @@
 #include "projectagentcpp/source_analyzer.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <iomanip>
 #include <sstream>
@@ -53,6 +54,19 @@ void writeString(std::ostringstream& out, const std::string& value) {
 
 std::string boolWord(bool value) {
     return value ? "yes" : "no";
+}
+
+std::string lowerAscii(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    return value;
+}
+
+bool containsAny(const std::string& value, const std::vector<std::string>& keywords) {
+    return std::any_of(keywords.begin(), keywords.end(), [&](const std::string& keyword) {
+        return value.find(keyword) != std::string::npos;
+    });
 }
 
 ToolResult makeResult(const std::string& tool_name, bool success, const std::string& observation) {
@@ -204,15 +218,30 @@ std::vector<std::string> ToolRegistry::listTools() const {
 }
 
 Plan Planner::plan(const std::string& task) const {
-    (void)task;
-    return Plan{{
-        "scan_project",
-        "analyze_cmake",
-        "analyze_sources",
-        "analyze_symbols",
-        "evaluate_project",
-        "generate_json",
-    }};
+    const auto normalized = lowerAscii(task);
+    const bool asks_cmake = containsAny(normalized, {"cmake", "build", "target", "architecture", "构建", "依赖", "架构"});
+    const bool asks_sources = containsAny(normalized, {"architecture", "module", "source", "架构", "模块", "源码"});
+    const bool asks_symbols = containsAny(normalized, {"clang", "symbol", "class", "function", "call", "符号", "类", "函数", "调用"});
+    const bool asks_interview = containsAny(normalized, {"interview", "report", "resume", "面试", "报告", "简历"});
+    const bool has_specific_intent = asks_cmake || asks_sources || asks_symbols || asks_interview;
+    const bool broad_analysis = normalized.empty()
+        || containsAny(normalized, {"overall", "complete", "full", "全面", "完整"})
+        || (!has_specific_intent && containsAny(normalized, {"analyze", "analysis", "project", "分析", "项目"}));
+
+    Plan plan;
+    plan.tool_names.push_back("scan_project");
+    if (broad_analysis || asks_cmake || asks_interview) {
+        plan.tool_names.push_back("analyze_cmake");
+    }
+    if (broad_analysis || asks_sources || asks_interview) {
+        plan.tool_names.push_back("analyze_sources");
+    }
+    if (broad_analysis || asks_symbols || asks_interview) {
+        plan.tool_names.push_back("analyze_symbols");
+    }
+    plan.tool_names.push_back("evaluate_project");
+    plan.tool_names.push_back("generate_json");
+    return plan;
 }
 
 Executor::Executor(const ToolRegistry& registry)

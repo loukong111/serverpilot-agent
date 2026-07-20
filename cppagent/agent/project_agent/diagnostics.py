@@ -8,6 +8,11 @@ import urllib.error
 import urllib.request
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from typing import Callable
+
+
+ProgressCallback = Callable[[int, str], None]
+CancelCallback = Callable[[], bool]
 
 
 @dataclass
@@ -47,40 +52,49 @@ def run_command_step(
     command: list[str],
     cwd: Path | None = None,
     timeout_seconds: int = 120,
+    should_cancel: CancelCallback | None = None,
 ) -> DiagnosticStep:
     start = time.monotonic()
-    try:
-        completed = subprocess.run(
-            command,
-            cwd=str(cwd) if cwd else None,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=timeout_seconds,
-        )
-        duration_ms = int((time.monotonic() - start) * 1000)
-        return DiagnosticStep(
-            name=name,
-            command=command,
-            success=completed.returncode == 0,
-            exit_code=completed.returncode,
-            duration_ms=duration_ms,
-            stdout=trim_output(completed.stdout),
-            stderr=trim_output(completed.stderr),
-            observation="command completed" if completed.returncode == 0 else "command failed",
-        )
-    except subprocess.TimeoutExpired as exc:
-        duration_ms = int((time.monotonic() - start) * 1000)
-        return DiagnosticStep(
-            name=name,
-            command=command,
-            success=False,
-            exit_code=None,
-            duration_ms=duration_ms,
-            stdout=trim_output(exc.stdout or ""),
-            stderr=trim_output(exc.stderr or ""),
-            observation=f"command timed out after {timeout_seconds}s",
-        )
+    process = subprocess.Popen(
+        command,
+        cwd=str(cwd) if cwd else None,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    observation = "command completed"
+    cancelled = False
+    timed_out = False
+    while True:
+        try:
+            stdout, stderr = process.communicate(timeout=0.2)
+            break
+        except subprocess.TimeoutExpired:
+            cancelled = bool(should_cancel and should_cancel())
+            timed_out = time.monotonic() - start >= timeout_seconds
+            if not cancelled and not timed_out:
+                continue
+            process.terminate()
+            try:
+                stdout, stderr = process.communicate(timeout=3)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                stdout, stderr = process.communicate()
+            observation = "command cancelled" if cancelled else f"command timed out after {timeout_seconds}s"
+            break
+
+    if process.returncode != 0 and not cancelled and not timed_out:
+        observation = "command failed"
+    return DiagnosticStep(
+        name=name,
+        command=command,
+        success=process.returncode == 0 and not cancelled and not timed_out,
+        exit_code=process.returncode,
+        duration_ms=int((time.monotonic() - start) * 1000),
+        stdout=trim_output(stdout or ""),
+        stderr=trim_output(stderr or ""),
+        observation=observation,
+    )
 
 
 def skipped_step(name: str, reason: str) -> DiagnosticStep:
@@ -118,6 +132,8 @@ def run_service_workflow(
     benchmark_command: str | None,
     stats_url: str | None,
     timeout_seconds: int,
+    should_cancel: CancelCallback | None = None,
+    on_progress: ProgressCallback | None = None,
 ) -> list[DiagnosticStep]:
     steps: list[DiagnosticStep] = []
     command = command_from_string(start_command)
@@ -129,7 +145,11 @@ def run_service_workflow(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
-    time.sleep(startup_seconds)
+    startup_deadline = time.monotonic() + startup_seconds
+    while process.poll() is None and time.monotonic() < startup_deadline:
+        if should_cancel and should_cancel():
+            break
+        time.sleep(0.05)
     running = process.poll() is None
     steps.append(
         DiagnosticStep(
@@ -138,23 +158,32 @@ def run_service_workflow(
             success=running,
             exit_code=process.returncode,
             duration_ms=int((time.monotonic() - start) * 1000),
-            observation="service is still running" if running else "service exited during startup",
+            observation=(
+                "service startup cancelled"
+                if should_cancel and should_cancel()
+                else ("service is still running" if running else "service exited during startup")
+            ),
         )
     )
 
     try:
         if running and stats_url:
+            if on_progress:
+                on_progress(78, "正在读取服务 stats")
             steps.append(fetch_stats(stats_url, timeout_seconds=min(timeout_seconds, 10)))
         elif stats_url:
             steps.append(skipped_step("fetch_stats", "service was not running"))
 
         if running and benchmark_command:
+            if on_progress:
+                on_progress(86, "正在执行压测命令")
             steps.append(
                 run_command_step(
                     "benchmark",
                     command_from_string(benchmark_command),
                     cwd=project_path,
                     timeout_seconds=timeout_seconds,
+                    should_cancel=should_cancel,
                 )
             )
         elif benchmark_command:
@@ -190,6 +219,9 @@ def build_suggestions(result: DiagnosticResult) -> list[str]:
     if not failed:
         suggestions.append("构建、测试和可选运行步骤没有发现失败，建议继续补充压测指标和长期运行日志。")
     for step in failed:
+        if "cancelled" in step.observation:
+            suggestions.append("诊断任务由用户取消，可以调整参数后重新运行。")
+            continue
         if step.name == "configure":
             suggestions.append("CMake 配置失败，优先检查编译器、依赖包、CMake option 和平台限制。")
         elif step.name == "build":
@@ -263,29 +295,79 @@ def run_diagnostics(
     benchmark_command: str | None,
     stats_url: str | None,
     timeout_seconds: int,
+    on_progress: ProgressCallback | None = None,
+    should_cancel: CancelCallback | None = None,
 ) -> DiagnosticResult:
     result = DiagnosticResult(project_path=str(project_path), build_dir=str(build_dir))
     build_dir.mkdir(parents=True, exist_ok=True)
 
+    def progress(value: int, message: str) -> None:
+        if on_progress:
+            on_progress(value, message)
+
+    def cancelled() -> bool:
+        return bool(should_cancel and should_cancel())
+
     if skip_configure:
         result.steps.append(skipped_step("configure", "skipped by user"))
     else:
+        progress(18, "正在执行 CMake 配置")
         configure_command = ["cmake", "-S", str(project_path), "-B", str(build_dir), *cmake_args]
-        result.steps.append(run_command_step("configure", configure_command, timeout_seconds=timeout_seconds))
+        result.steps.append(
+            run_command_step(
+                "configure",
+                configure_command,
+                timeout_seconds=timeout_seconds,
+                should_cancel=should_cancel,
+            )
+        )
 
-    if skip_build:
+    configure_ready = skip_configure or result.steps[-1].success
+    if cancelled():
+        result.steps.append(skipped_step("build", "diagnosis cancelled"))
+        build_ready = False
+    elif not configure_ready:
+        result.steps.append(skipped_step("build", "configure step failed"))
+        build_ready = False
+    elif skip_build:
         result.steps.append(skipped_step("build", "skipped by user"))
+        build_ready = True
     else:
+        progress(42, "正在编译项目")
         build_command = ["cmake", "--build", str(build_dir), *build_args]
-        result.steps.append(run_command_step("build", build_command, timeout_seconds=timeout_seconds))
+        result.steps.append(
+            run_command_step(
+                "build",
+                build_command,
+                timeout_seconds=timeout_seconds,
+                should_cancel=should_cancel,
+            )
+        )
+        build_ready = result.steps[-1].success
 
-    if skip_test:
+    if cancelled():
+        result.steps.append(skipped_step("test", "diagnosis cancelled"))
+    elif not build_ready:
+        result.steps.append(skipped_step("test", "build step failed or was unavailable"))
+    elif skip_test:
         result.steps.append(skipped_step("test", "skipped by user"))
     else:
+        progress(65, "正在运行 CTest")
         test_command = ["ctest", "--test-dir", str(build_dir), "--output-on-failure", *ctest_args]
-        result.steps.append(run_command_step("test", test_command, timeout_seconds=timeout_seconds))
+        result.steps.append(
+            run_command_step(
+                "test",
+                test_command,
+                timeout_seconds=timeout_seconds,
+                should_cancel=should_cancel,
+            )
+        )
 
-    if start_command:
+    if cancelled():
+        if start_command:
+            result.steps.append(skipped_step("start_service", "diagnosis cancelled"))
+    elif start_command:
+        progress(74, "正在启动服务")
         result.steps.extend(
             run_service_workflow(
                 start_command=start_command,
@@ -294,18 +376,23 @@ def run_diagnostics(
                 benchmark_command=benchmark_command,
                 stats_url=stats_url,
                 timeout_seconds=timeout_seconds,
+                should_cancel=should_cancel,
+                on_progress=on_progress,
             )
         )
     else:
         if stats_url:
+            progress(78, "正在读取 stats")
             result.steps.append(fetch_stats(stats_url, timeout_seconds=min(timeout_seconds, 10)))
         if benchmark_command:
+            progress(86, "正在执行压测命令")
             result.steps.append(
                 run_command_step(
                     "benchmark",
                     command_from_string(benchmark_command),
                     cwd=project_path,
                     timeout_seconds=timeout_seconds,
+                    should_cancel=should_cancel,
                 )
             )
 
@@ -314,4 +401,5 @@ def run_diagnostics(
             result.stats_body = step.stdout
             break
     result.suggestions = build_suggestions(result)
+    progress(94, "正在生成诊断报告")
     return result
