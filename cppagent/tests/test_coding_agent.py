@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from agent.project_agent.coding_agent import (
     CodingAgentError,
     apply_proposal,
     collect_code_context,
+    load_proposal,
     parse_coding_response,
     rollback_proposal,
     save_proposal,
@@ -106,6 +108,24 @@ class CodingAgentTest(unittest.TestCase):
 
         rollback_proposal(self.proposal_dir, str(proposal["id"]))
         self.assertFalse(new_file.exists())
+
+    def test_concurrent_apply_only_mutates_project_once(self) -> None:
+        proposal = self.make_proposal()
+
+        def attempt_apply() -> str:
+            try:
+                apply_proposal(self.proposal_dir, self.backup_dir, str(proposal["id"]))
+                return "applied"
+            except CodingAgentError:
+                return "rejected"
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            outcomes = list(executor.map(lambda _index: attempt_apply(), range(2)))
+
+        self.assertEqual(["applied", "rejected"], sorted(outcomes))
+        self.assertIn("return 2", self.source.read_text(encoding="utf-8"))
+        stored = load_proposal(self.proposal_dir, str(proposal["id"]))
+        self.assertEqual("applied", stored["status"])
 
     def test_validate_patch_rejects_unsafe_and_generated_paths(self) -> None:
         unsafe = (

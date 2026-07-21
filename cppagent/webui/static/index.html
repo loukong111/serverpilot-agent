@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>ProjectAgentCpp</title>
     <link rel="icon" href="data:," />
-    <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="/styles.css?v=0.5.0" />
   </head>
   <body>
     <main class="app-shell">
@@ -14,18 +14,21 @@
           <div class="brand-mark" aria-hidden="true">P</div>
           <div>
             <h1>ProjectAgentCpp</h1>
-            <p>C++ Project Agent</p>
+            <p>C++ Coding Agent</p>
           </div>
         </header>
 
-        <section class="project-control">
-          <label for="projectPath">项目路径</label>
-          <input id="projectPath" value="/home/wcl/project/miniredis" spellcheck="false" />
-        </section>
+        <button id="openProjectBtn" class="project-switcher" type="button">
+          <span class="control-label">当前项目</span>
+          <strong id="sidebarProjectName">miniredis</strong>
+          <span id="sidebarProjectPath" class="project-path">/home/wcl/project/miniredis</span>
+        </button>
+
+        <button id="newTaskBtn" class="new-task-button" type="button">新建任务</button>
 
         <section class="history-section" aria-labelledby="historyTitle">
           <div class="section-heading">
-            <h2 id="historyTitle">分析历史</h2>
+            <h2 id="historyTitle">最近任务</h2>
             <button id="refreshHistoryBtn" class="quiet small" type="button">刷新</button>
           </div>
           <div id="historyList" class="history-list">
@@ -35,202 +38,41 @@
 
         <footer class="sidebar-footer">
           <p id="statusText" class="status-text" aria-live="polite">就绪</p>
+          <button id="openSettingsBtn" class="sidebar-settings" type="button">模型设置</button>
         </footer>
       </aside>
 
-      <section class="main-area">
-        <nav class="workflow-tabs" role="tablist" aria-label="工作区">
-          <button class="workflow-tab active" type="button" role="tab" aria-selected="true" data-workflow="analysisPanel">项目分析</button>
-          <button class="workflow-tab" type="button" role="tab" aria-selected="false" data-workflow="codingPanel">代码修改</button>
-          <button class="workflow-tab" type="button" role="tab" aria-selected="false" data-workflow="interviewPanel">面试准备</button>
-          <button class="workflow-tab" type="button" role="tab" aria-selected="false" data-workflow="diagnosisPanel">项目诊断</button>
-        </nav>
+      <section class="workspace">
+        <header class="workspace-header">
+          <div>
+            <p class="breadcrumb">项目 / <span id="headerProjectName">miniredis</span></p>
+            <h2>Agent 工作台</h2>
+          </div>
+          <div class="header-actions">
+            <button id="openInterviewBtn" type="button">面试准备</button>
+            <button id="openToolsBtn" type="button">高级工具</button>
+            <button id="openSettingsTopBtn" type="button">设置</button>
+          </div>
+        </header>
 
-        <section class="workbench">
-          <section id="analysisPanel" class="workflow-panel active" role="tabpanel">
-            <div class="panel-heading">
-              <div>
-                <p class="eyebrow">Analysis</p>
-                <h2>项目分析</h2>
-              </div>
-              <div class="action-row">
-                <button id="agentBtn" type="button">运行 Trace</button>
-                <button id="analyzeBtn" class="primary" type="button">开始分析</button>
-              </div>
+        <section class="task-composer" aria-labelledby="taskTitle">
+          <div class="composer-heading">
+            <div>
+              <p class="eyebrow">New task</p>
+              <h2 id="taskTitle">需要 Agent 做什么？</h2>
             </div>
-
-            <div class="form-grid two-columns">
-              <label class="field wide-field" for="agentTask">
-                <span>Agent 任务</span>
-                <input id="agentTask" value="分析项目架构、核心模块和代码符号" />
-              </label>
-              <label class="field" for="reportStyle">
-                <span>报告风格</span>
-                <select id="reportStyle">
-                  <option value="interview">面试强化</option>
-                  <option value="resume">简历强化</option>
-                  <option value="deep">深挖问题</option>
-                </select>
-              </label>
-              <label class="toggle-field">
-                <input id="useLlm" type="checkbox" checked />
-                <span>使用 LLM 生成报告</span>
-              </label>
+            <div class="mode-switch" role="group" aria-label="任务模式">
+              <button class="mode-button" type="button" data-task-mode="analysis">分析</button>
+              <button class="mode-button active" type="button" data-task-mode="coding" aria-pressed="true">修改代码</button>
+              <button class="mode-button" type="button" data-task-mode="diagnosis">诊断</button>
             </div>
-
-            <details class="settings-block">
-              <summary>模型设置</summary>
-              <div class="form-grid three-columns">
-                <label class="field" for="modelName">
-                  <span>模型</span>
-                  <input id="modelName" placeholder="PROJECTAGENTCPP_MODEL" spellcheck="false" />
-                </label>
-                <label class="field" for="apiKey">
-                  <span>API Key</span>
-                  <input id="apiKey" type="password" placeholder="OPENAI_API_KEY" autocomplete="off" spellcheck="false" />
-                </label>
-                <label class="field" for="baseUrl">
-                  <span>Base URL</span>
-                  <input id="baseUrl" value="https://api.openai.com/v1" spellcheck="false" />
-                </label>
-              </div>
-            </details>
-
-            <details class="settings-block">
-              <summary>Clang AST</summary>
-              <div class="form-grid three-columns">
-                <label class="field" for="compileDb">
-                  <span>Compile DB</span>
-                  <input id="compileDb" placeholder="/path/to/compile_commands.json" spellcheck="false" />
-                </label>
-                <label class="field" for="astJson">
-                  <span>已有 AST JSON</span>
-                  <input id="astJson" placeholder="examples/sample_ast.json" spellcheck="false" />
-                </label>
-                <label class="field" for="clangBin">
-                  <span>Clang Bin</span>
-                  <input id="clangBin" value="clang++" spellcheck="false" />
-                </label>
-                <label class="field" for="astMaxFiles">
-                  <span>最大文件数</span>
-                  <input id="astMaxFiles" type="number" value="3" min="1" />
-                </label>
-                <label class="field" for="astTimeout">
-                  <span>超时（秒）</span>
-                  <input id="astTimeout" type="number" value="60" min="1" />
-                </label>
-                <div class="field action-field">
-                  <span>操作</span>
-                  <button id="astBtn" type="button">运行 AST</button>
-                </div>
-              </div>
-            </details>
-          </section>
-
-          <section id="codingPanel" class="workflow-panel" role="tabpanel" hidden>
-            <div class="panel-heading">
-              <div>
-                <p class="eyebrow">Coding Agent</p>
-                <h2>代码修改</h2>
-              </div>
-              <button id="codingBtn" class="primary" type="button">生成修改方案</button>
-            </div>
-            <div class="form-grid">
-              <label class="field wide-field" for="codingTask">
-                <span>开发任务</span>
-                <textarea id="codingTask" rows="5">为项目补充一个小型功能，并添加对应单元测试</textarea>
-              </label>
-            </div>
-            <details class="settings-block">
-              <summary>模型设置</summary>
-              <div class="form-grid three-columns">
-                <label class="field" for="codingModelName">
-                  <span>模型</span>
-                  <input id="codingModelName" placeholder="PROJECTAGENTCPP_MODEL" spellcheck="false" />
-                </label>
-                <label class="field" for="codingApiKey">
-                  <span>API Key</span>
-                  <input id="codingApiKey" type="password" placeholder="OPENAI_API_KEY" autocomplete="off" spellcheck="false" />
-                </label>
-                <label class="field" for="codingBaseUrl">
-                  <span>Base URL</span>
-                  <input id="codingBaseUrl" value="https://api.openai.com/v1" spellcheck="false" />
-                </label>
-              </div>
-            </details>
-          </section>
-
-          <section id="interviewPanel" class="workflow-panel" role="tabpanel" hidden>
-            <div class="panel-heading">
-              <div>
-                <p class="eyebrow">Interview</p>
-                <h2>面试准备</h2>
-              </div>
-              <button id="askBtn" class="primary" type="button">生成回答</button>
-            </div>
-            <div class="form-grid interview-grid">
-              <label class="field wide-field" for="question">
-                <span>面试问题</span>
-                <textarea id="question" rows="4">这个项目最能体现你 C++ 能力的地方是什么？</textarea>
-              </label>
-              <label class="toggle-field">
-                <input id="askUseLlm" type="checkbox" />
-                <span>使用 LLM 回答</span>
-              </label>
-            </div>
-          </section>
-
-          <section id="diagnosisPanel" class="workflow-panel" role="tabpanel" hidden>
-            <div class="panel-heading">
-              <div>
-                <p class="eyebrow">Diagnosis</p>
-                <h2>项目诊断</h2>
-              </div>
-              <button id="diagnoseBtn" class="primary" type="button">开始诊断</button>
-            </div>
-            <div class="form-grid two-columns">
-              <label class="field" for="diagnoseMode">
-                <span>诊断模式</span>
-                <select id="diagnoseMode">
-                  <option value="dry">仅生成诊断框架</option>
-                  <option value="build-test">构建并测试</option>
-                </select>
-              </label>
-              <label class="field" for="diagnoseTimeout">
-                <span>超时（秒）</span>
-                <input id="diagnoseTimeout" type="number" value="180" min="1" />
-              </label>
-            </div>
-            <details class="settings-block">
-              <summary>诊断参数</summary>
-              <div class="form-grid two-columns">
-                <label class="field" for="cmakeArgs">
-                  <span>CMake 参数</span>
-                  <input id="cmakeArgs" placeholder="-DCMAKE_BUILD_TYPE=Debug" spellcheck="false" />
-                </label>
-                <label class="field" for="buildArgs">
-                  <span>构建参数</span>
-                  <input id="buildArgs" placeholder="--parallel 4" spellcheck="false" />
-                </label>
-                <label class="field" for="ctestArgs">
-                  <span>CTest 参数</span>
-                  <input id="ctestArgs" placeholder="-R miniredis_unit_tests" spellcheck="false" />
-                </label>
-                <label class="field" for="statsUrl">
-                  <span>Stats URL</span>
-                  <input id="statsUrl" placeholder="http://127.0.0.1:8080/stats" spellcheck="false" />
-                </label>
-                <label class="field" for="startCommand">
-                  <span>服务启动命令</span>
-                  <input id="startCommand" placeholder="./build/miniredis --config config/miniredis.conf" spellcheck="false" />
-                </label>
-                <label class="field" for="benchmarkCommand">
-                  <span>压测命令</span>
-                  <input id="benchmarkCommand" placeholder="redis-cli -p 6379 ping" spellcheck="false" />
-                </label>
-              </div>
-            </details>
-          </section>
+          </div>
+          <label class="sr-only" for="codingTask">任务描述</label>
+          <textarea id="codingTask" rows="4">为项目补充一个小型功能，并添加对应单元测试</textarea>
+          <div class="composer-footer">
+            <p id="modeHint">Agent 将检索相关源码、生成候选 Diff，并等待确认。</p>
+            <button id="runAgentBtn" class="primary run-button" type="button">生成修改方案</button>
+          </div>
         </section>
 
         <section id="jobPanel" class="job-panel" aria-label="任务进度" hidden>
@@ -239,27 +81,31 @@
               <p id="jobLabel" class="job-label">任务</p>
               <p id="jobMessage" class="job-message" aria-live="polite">准备中</p>
             </div>
-            <button id="cancelBtn" class="danger" type="button">取消</button>
+            <div class="job-actions">
+              <button id="openLogBtn" type="button">查看日志</button>
+              <button id="cancelBtn" class="danger" type="button">取消</button>
+            </div>
           </div>
           <progress id="jobProgress" max="100" value="0">0%</progress>
-          <details class="job-log-block">
-            <summary>运行日志</summary>
-            <pre id="jobLog" class="job-log"></pre>
-          </details>
         </section>
 
-        <section class="output-area">
-          <div class="output-toolbar">
-            <nav class="output-tabs" role="tablist" aria-label="输出视图">
-              <button class="output-tab active" type="button" role="tab" aria-selected="true" data-view="reportView">报告</button>
-              <button class="output-tab" type="button" role="tab" aria-selected="false" data-view="diffView">代码 Diff</button>
-              <button class="output-tab" type="button" role="tab" aria-selected="false" data-view="traceView">Trace</button>
-              <button class="output-tab" type="button" role="tab" aria-selected="false" data-view="jsonView">JSON</button>
+        <section class="result-area" aria-labelledby="resultTitle">
+          <header class="result-toolbar">
+            <div class="result-heading">
+              <p class="eyebrow">Workspace</p>
+              <h2 id="resultTitle">任务结果</h2>
+            </div>
+            <nav class="main-output-tabs" role="tablist" aria-label="结果视图">
+              <button id="summaryTab" class="main-output-tab active" type="button" role="tab" aria-selected="true" aria-controls="reportView" data-view="reportView">摘要</button>
+              <button id="diffTab" class="main-output-tab" type="button" role="tab" aria-selected="false" aria-controls="diffView" data-view="diffView" tabindex="-1">代码 Diff</button>
             </nav>
-            <button id="clearBtn" class="quiet" type="button">清空结果</button>
-          </div>
+            <div class="result-actions">
+              <button id="openDetailsBtn" type="button">运行详情</button>
+              <button id="clearBtn" class="quiet" type="button">清空</button>
+            </div>
+          </header>
 
-          <section id="reportView" class="output-view active" role="tabpanel">
+          <section id="reportView" class="main-output-view active" role="tabpanel" aria-labelledby="summaryTab">
             <section id="talkPanel" class="talk-panel" hidden>
               <div class="talk-header">
                 <div>
@@ -277,35 +123,219 @@
               </div>
               <p id="talkOutput" class="talk-output"></p>
             </section>
-            <div id="reportOutput" class="markdown empty-state">等待分析结果</div>
+            <div id="reportOutput" class="markdown empty-state">
+              <h3>从一个任务开始</h3>
+              <p>选择模式并描述目标，Agent 会在这里整理计划、报告和验证结果。</p>
+            </div>
           </section>
 
-          <section id="diffView" class="output-view" role="tabpanel" hidden>
+          <section id="diffView" class="main-output-view" role="tabpanel" aria-labelledby="diffTab" hidden>
             <div id="proposalToolbar" class="proposal-toolbar" hidden>
               <div>
                 <p class="eyebrow">Proposal</p>
                 <p id="proposalStatus" class="proposal-status">等待修改方案</p>
               </div>
-              <div class="action-row">
+              <div class="proposal-actions">
                 <button id="rollbackPatchBtn" class="danger" type="button" disabled>回滚</button>
+                <button id="repairPatchBtn" type="button" disabled>分析错误</button>
                 <button id="verifyPatchBtn" type="button" disabled>构建测试</button>
                 <button id="applyPatchBtn" class="primary" type="button" disabled>应用补丁</button>
               </div>
             </div>
             <pre id="diffOutput" class="diff-view empty-state">等待 Coding Agent 生成候选补丁</pre>
           </section>
-
-          <section id="traceView" class="output-view" role="tabpanel" hidden>
-            <div id="traceOutput" class="trace empty-state">等待 Agent Trace</div>
-          </section>
-
-          <section id="jsonView" class="output-view" role="tabpanel" hidden>
-            <pre id="jsonOutput" class="json-view">{}</pre>
-          </section>
         </section>
       </section>
     </main>
 
-    <script src="/app.js"></script>
+    <div id="drawerBackdrop" class="drawer-backdrop" hidden></div>
+    <aside id="detailsDrawer" class="details-drawer" aria-labelledby="detailsTitle" hidden>
+      <header class="drawer-header">
+        <div>
+          <p class="eyebrow">Agent details</p>
+          <h2 id="detailsTitle">运行详情</h2>
+        </div>
+        <button id="closeDetailsBtn" class="quiet" type="button" aria-label="关闭运行详情">关闭</button>
+      </header>
+      <nav class="detail-tabs" role="tablist" aria-label="运行详情视图">
+        <button id="logTab" class="detail-tab active" type="button" role="tab" aria-selected="true" aria-controls="logView" data-detail-view="logView">日志</button>
+        <button id="traceTab" class="detail-tab" type="button" role="tab" aria-selected="false" aria-controls="traceView" data-detail-view="traceView" tabindex="-1">Trace</button>
+        <button id="jsonTab" class="detail-tab" type="button" role="tab" aria-selected="false" aria-controls="jsonView" data-detail-view="jsonView" tabindex="-1">JSON</button>
+      </nav>
+      <section id="logView" class="detail-view active" role="tabpanel" aria-labelledby="logTab">
+        <pre id="jobLog" class="job-log">暂无运行日志</pre>
+      </section>
+      <section id="traceView" class="detail-view" role="tabpanel" aria-labelledby="traceTab" hidden>
+        <div id="traceOutput" class="trace empty-state">等待 Agent Trace</div>
+      </section>
+      <section id="jsonView" class="detail-view" role="tabpanel" aria-labelledby="jsonTab" hidden>
+        <pre id="jsonOutput" class="json-view">{}</pre>
+      </section>
+    </aside>
+
+    <dialog id="settingsDialog" class="app-dialog" aria-labelledby="settingsTitle">
+      <div class="dialog-header">
+        <div>
+          <p class="eyebrow">Settings</p>
+          <h2 id="settingsTitle">模型设置</h2>
+        </div>
+        <button class="quiet" type="button" data-close-dialog="settingsDialog">关闭</button>
+      </div>
+      <div class="dialog-body form-grid">
+        <label class="field" for="modelName">
+          <span>模型</span>
+          <input id="modelName" placeholder="PROJECTAGENTCPP_MODEL" spellcheck="false" />
+        </label>
+        <label class="field" for="apiKey">
+          <span>API Key</span>
+          <input id="apiKey" type="password" placeholder="OPENAI_API_KEY" autocomplete="off" spellcheck="false" />
+        </label>
+        <label class="field" for="baseUrl">
+          <span>Base URL</span>
+          <input id="baseUrl" value="https://api.openai.com/v1" spellcheck="false" />
+        </label>
+        <label class="field" for="reportStyle">
+          <span>报告风格</span>
+          <select id="reportStyle">
+            <option value="interview">面试强化</option>
+            <option value="resume">简历强化</option>
+            <option value="deep">深挖问题</option>
+          </select>
+        </label>
+        <label class="toggle-field">
+          <input id="useLlm" type="checkbox" checked />
+          <span>分析报告使用 LLM</span>
+        </label>
+        <label class="toggle-field">
+          <input id="codingAutoLoop" type="checkbox" checked />
+          <span>自动推进构建与修复</span>
+        </label>
+      </div>
+      <div class="dialog-footer">
+        <button class="primary" type="button" data-close-dialog="settingsDialog">完成</button>
+      </div>
+    </dialog>
+
+    <dialog id="projectDialog" class="app-dialog wide-dialog" aria-labelledby="projectDialogTitle">
+      <div class="dialog-header">
+        <div>
+          <p class="eyebrow">Project</p>
+          <h2 id="projectDialogTitle">项目设置</h2>
+        </div>
+        <button class="quiet" type="button" data-close-dialog="projectDialog">关闭</button>
+      </div>
+      <div class="dialog-body">
+        <label class="field" for="projectPath">
+          <span>项目路径</span>
+          <input id="projectPath" value="/home/wcl/project/miniredis" spellcheck="false" />
+        </label>
+
+        <details class="settings-block">
+          <summary>构建与运行</summary>
+          <div class="form-grid two-columns">
+            <label class="field" for="diagnoseMode">
+              <span>诊断模式</span>
+              <select id="diagnoseMode">
+                <option value="dry">仅生成诊断框架</option>
+                <option value="build-test" selected>构建并测试</option>
+              </select>
+            </label>
+            <label class="field" for="diagnoseTimeout">
+              <span>超时（秒）</span>
+              <input id="diagnoseTimeout" type="number" value="180" min="1" />
+            </label>
+            <label class="field" for="cmakeArgs"><span>CMake 参数</span><input id="cmakeArgs" placeholder="-DCMAKE_BUILD_TYPE=Debug" spellcheck="false" /></label>
+            <label class="field" for="buildArgs"><span>构建参数</span><input id="buildArgs" placeholder="--parallel 4" spellcheck="false" /></label>
+            <label class="field" for="ctestArgs"><span>CTest 参数</span><input id="ctestArgs" placeholder="-R unit_tests" spellcheck="false" /></label>
+            <label class="field" for="statsUrl"><span>Stats URL</span><input id="statsUrl" placeholder="http://127.0.0.1:8080/stats" spellcheck="false" /></label>
+            <label class="field" for="startCommand"><span>服务启动命令</span><input id="startCommand" placeholder="./build/server --config config/server.conf" spellcheck="false" /></label>
+            <label class="field" for="benchmarkCommand"><span>压测命令</span><input id="benchmarkCommand" placeholder="./build/bench_client" spellcheck="false" /></label>
+          </div>
+        </details>
+
+        <details class="settings-block">
+          <summary>Clang AST</summary>
+          <div class="form-grid two-columns">
+            <label class="field" for="compileDb"><span>Compile DB</span><input id="compileDb" placeholder="/path/to/compile_commands.json" spellcheck="false" /></label>
+            <label class="field" for="astJson"><span>已有 AST JSON</span><input id="astJson" placeholder="examples/sample_ast.json" spellcheck="false" /></label>
+            <label class="field" for="clangBin"><span>Clang Bin</span><input id="clangBin" value="clang++" spellcheck="false" /></label>
+            <label class="field" for="astMaxFiles"><span>最大文件数</span><input id="astMaxFiles" type="number" value="3" min="1" /></label>
+            <label class="field" for="astTimeout"><span>超时（秒）</span><input id="astTimeout" type="number" value="60" min="1" /></label>
+          </div>
+        </details>
+      </div>
+      <div class="dialog-footer">
+        <button class="primary" type="button" data-close-dialog="projectDialog">保存设置</button>
+      </div>
+    </dialog>
+
+    <dialog id="interviewDialog" class="app-dialog" aria-labelledby="interviewTitle">
+      <div class="dialog-header">
+        <div>
+          <p class="eyebrow">Interview</p>
+          <h2 id="interviewTitle">面试准备</h2>
+        </div>
+        <button class="quiet" type="button" data-close-dialog="interviewDialog">关闭</button>
+      </div>
+      <div class="dialog-body form-grid">
+        <label class="field" for="question">
+          <span>面试问题</span>
+          <textarea id="question" rows="5">这个项目最能体现你 C++ 能力的地方是什么？</textarea>
+        </label>
+        <label class="toggle-field">
+          <input id="askUseLlm" type="checkbox" />
+          <span>使用 LLM 回答</span>
+        </label>
+      </div>
+      <div class="dialog-footer">
+        <button type="button" data-close-dialog="interviewDialog">取消</button>
+        <button id="askBtn" class="primary" type="button">生成回答</button>
+      </div>
+    </dialog>
+
+    <dialog id="toolsDialog" class="app-dialog" aria-labelledby="toolsTitle">
+      <div class="dialog-header">
+        <div>
+          <p class="eyebrow">Advanced</p>
+          <h2 id="toolsTitle">高级工具</h2>
+        </div>
+        <button class="quiet" type="button" data-close-dialog="toolsDialog">关闭</button>
+      </div>
+      <div class="dialog-body tool-list">
+        <div class="tool-row">
+          <div><strong>Agent Trace</strong><p>查看 Planner 和 Tool 的完整执行链。</p></div>
+          <button id="agentBtn" type="button">运行 Trace</button>
+        </div>
+        <div class="tool-row">
+          <div><strong>Clang AST</strong><p>读取 compile_commands.json 并提取符号关系。</p></div>
+          <button id="astBtn" type="button">运行 AST</button>
+        </div>
+      </div>
+    </dialog>
+
+    <dialog id="confirmDialog" class="app-dialog confirm-dialog" aria-labelledby="confirmTitle">
+      <div class="dialog-header">
+        <h2 id="confirmTitle">确认操作</h2>
+      </div>
+      <div class="dialog-body">
+        <p id="confirmMessage"></p>
+      </div>
+      <div class="dialog-footer">
+        <button id="confirmCancelBtn" type="button">取消</button>
+        <button id="confirmAcceptBtn" class="primary" type="button">确认</button>
+      </div>
+    </dialog>
+
+    <div hidden>
+      <input id="agentTask" value="分析项目架构、核心模块和代码符号" />
+      <input id="codingModelName" />
+      <input id="codingApiKey" />
+      <input id="codingBaseUrl" />
+      <button id="analyzeBtn" type="button">分析</button>
+      <button id="codingBtn" type="button">修改</button>
+      <button id="diagnoseBtn" type="button">诊断</button>
+    </div>
+
+    <script src="/app.js?v=0.5.0"></script>
   </body>
 </html>

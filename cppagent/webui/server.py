@@ -46,7 +46,9 @@ from agent.project_agent.coding_agent import (  # noqa: E402
     CodingAgentError,
     apply_proposal,
     build_coding_messages,
+    build_repair_messages,
     collect_code_context,
+    diagnostic_failure_summary,
     load_proposal,
     parse_coding_response,
     proposal_markdown,
@@ -77,6 +79,7 @@ STYLE_PROMPTS = {
     "resume": "这次报告请偏简历表达，强调可量化的项目亮点、工程能力和简历 bullet 写法。",
     "deep": "这次报告请偏深挖问题，强调架构边界、潜在风险、测试缺口和下一步改进路线。",
 }
+REPAIRABLE_DIAGNOSTIC_STEPS = {"configure", "build", "test"}
 
 ANALYSIS_CACHE: dict[str, tuple[tuple[int, int], dict[str, Any]]] = {}
 CACHE_LOCK = threading.Lock()
@@ -281,12 +284,14 @@ def generate_llm_report(data: dict[str, Any], payload: dict[str, Any]) -> str:
     model = str(payload.get("model") or os.environ.get("PROJECTAGENTCPP_MODEL") or os.environ.get("OPENAI_MODEL") or "")
     base_url = str(payload.get("base_url") or os.environ.get("PROJECTAGENTCPP_BASE_URL") or os.environ.get("OPENAI_BASE_URL") or "https://api.openai.com/v1")
     style = str(payload.get("style") or "interview")
+    task = str(payload.get("task") or "").strip()
     messages = build_report_messages(data)
     messages.append(
         {
             "role": "user",
             "content": (
                 f"{STYLE_PROMPTS.get(style, STYLE_PROMPTS['interview'])}\n"
+                f"用户本次关注重点：{task or '完整分析项目'}。\n"
                 f"本次生成编号：{uuid.uuid4().hex[:12]}。\n"
                 "请在不改变事实的前提下换一种自然表达方式，不要每次使用完全相同的句式。"
             ),
@@ -515,6 +520,154 @@ def handle_coding(
     }
 
 
+def handle_coding_repair(
+    payload: dict[str, Any],
+    progress: ProgressCallback = noop_progress,
+    should_cancel: CancelCallback = never_cancel,
+) -> dict[str, Any]:
+    project_path = safe_project_path(payload.get("project_path"))
+    parent_id = str(payload.get("proposal_id") or "")
+    diagnostic_history_id = str(payload.get("diagnostic_history_id") or "")
+    parent = load_proposal(PROPOSAL_DIR, parent_id)
+    if parent.get("status") != "applied":
+        raise CodingAgentError("只有已经应用的补丁才能进入构建修复循环。")
+    if Path(str(parent.get("project_path"))).resolve() != project_path:
+        raise CodingAgentError("修改方案与诊断项目不一致。")
+    round_number = int(parent.get("round") or 1) + 1
+    if round_number > 5:
+        raise CodingAgentError("自动修复最多执行 5 轮，请人工检查当前错误。")
+
+    progress(10, "正在读取失败诊断")
+    history = load_history(diagnostic_history_id)
+    if history["item"].get("action") != "diagnose":
+        raise CodingAgentError("选择的历史记录不是项目诊断结果。")
+    diagnostic = history["data"]
+    if Path(str(diagnostic.get("project_path") or "")).resolve() != project_path:
+        raise CodingAgentError("诊断结果与当前项目不一致。")
+    repairable_steps = [
+        str(step.get("name"))
+        for step in diagnostic.get("steps", [])
+        if not step.get("success")
+        and not step.get("skipped")
+        and step.get("name") in REPAIRABLE_DIAGNOSTIC_STEPS
+    ]
+    if not repairable_steps:
+        raise CodingAgentError("当前失败属于运行环境或压测诊断，不适合自动修改代码。")
+    repair_diagnostic = dict(diagnostic)
+    repair_diagnostic["steps"] = [
+        step for step in diagnostic.get("steps", []) if step.get("name") in REPAIRABLE_DIAGNOSTIC_STEPS
+    ]
+    failure_summary = diagnostic_failure_summary(repair_diagnostic)
+
+    check_cancel(should_cancel)
+    progress(28, f"正在准备第 {round_number} 轮修复上下文")
+    analysis = get_analysis(project_path, progress, should_cancel)
+    task = str(parent.get("task") or payload.get("task") or "修复构建和测试错误").strip()
+    context = collect_code_context(project_path, f"{task}\n{failure_summary[:5000]}")
+    if not context["files"]:
+        raise CodingAgentError("没有找到与构建错误相关的源码文件。")
+
+    check_cancel(should_cancel)
+    progress(62, f"Coding Agent 正在生成第 {round_number} 轮修复")
+    model = str(
+        payload.get("model")
+        or os.environ.get("PROJECTAGENTCPP_MODEL")
+        or os.environ.get("OPENAI_MODEL")
+        or ""
+    )
+    base_url = str(
+        payload.get("base_url")
+        or os.environ.get("PROJECTAGENTCPP_BASE_URL")
+        or os.environ.get("OPENAI_BASE_URL")
+        or "https://api.openai.com/v1"
+    )
+    client = LLMClient(
+        LLMConfig(
+            model=model,
+            base_url=base_url,
+            api_key_env=str(payload.get("api_key_env") or "OPENAI_API_KEY"),
+            api_key=str(payload.get("api_key") or ""),
+            timeout_seconds=120,
+            temperature=0.1,
+        )
+    )
+    response = client.chat(build_repair_messages(task, analysis, context, repair_diagnostic, parent))
+    proposal = parse_coding_response(response)
+
+    check_cancel(should_cancel)
+    progress(84, "正在校验修复补丁")
+    validate_patch(project_path, proposal["patch"])
+    record = save_proposal(
+        PROPOSAL_DIR,
+        project_path,
+        task,
+        proposal,
+        context,
+        kind="repair",
+        parent_id=parent_id,
+        round_number=round_number,
+        diagnostic_history_id=diagnostic_history_id,
+    )
+    markdown = proposal_markdown(record)
+    trace = {
+        "task": task,
+        "root": str(project_path),
+        "steps": [
+            {
+                "index": 1,
+                "tool": "read_diagnostic",
+                "success": True,
+                "duration_ms": 0,
+                "observation": f"已读取失败诊断 {diagnostic_history_id}。",
+            },
+            {
+                "index": 2,
+                "tool": "analyze_failure",
+                "success": True,
+                "duration_ms": 0,
+                "observation": "已提取失败 command、exit code、stdout 和 stderr。",
+            },
+            {
+                "index": 3,
+                "tool": "search_code",
+                "success": True,
+                "duration_ms": 0,
+                "observation": f"读取 {len(context['files'])} 个相关源码文件。",
+            },
+            {
+                "index": 4,
+                "tool": "generate_repair_patch",
+                "success": True,
+                "duration_ms": 0,
+                "observation": f"已生成第 {round_number} 轮候选修复。",
+            },
+            {
+                "index": 5,
+                "tool": "validate_patch",
+                "success": True,
+                "duration_ms": 0,
+                "observation": "修复补丁已通过安全检查和 git apply --check。",
+            },
+        ],
+    }
+    history_item = save_history(
+        "coding_repair",
+        project_path,
+        f"第 {round_number} 轮代码修复",
+        markdown,
+        {"proposal": record, "trace": trace},
+        used_llm=True,
+    )
+    return {
+        "ok": True,
+        "proposal": record,
+        "trace": trace,
+        "markdown": markdown,
+        "matches": context["matches"],
+        "history_item": history_item,
+    }
+
+
 def handle_coding_apply(payload: dict[str, Any]) -> dict[str, Any]:
     proposal_id = str(payload.get("proposal_id") or "")
     record = apply_proposal(PROPOSAL_DIR, BACKUP_DIR, proposal_id)
@@ -622,9 +775,32 @@ def handle_diagnose(
     check_cancel(should_cancel)
     markdown = generate_diagnostic_report(result)
     diagnostic_data = json.loads(result_to_json(result))
+    steps = diagnostic_data.get("steps", [])
+    failed_steps = [
+        step["name"] for step in steps if not step.get("success") and not step.get("skipped")
+    ]
+    repairable_steps = [name for name in failed_steps if name in REPAIRABLE_DIAGNOSTIC_STEPS]
+    test_step = next((step for step in steps if step.get("name") == "test"), None)
+    test_output = ""
+    if test_step:
+        test_output = f"{test_step.get('stdout', '')}\n{test_step.get('stderr', '')}".lower()
+    no_tests_found = "no tests were found" in test_output
+    verification_status = "failed" if failed_steps else "passed"
+    if not failed_steps and (not test_step or test_step.get("skipped") or no_tests_found):
+        verification_status = "incomplete"
+    diagnostic_data["success"] = not failed_steps
+    diagnostic_data["failed_steps"] = failed_steps
+    diagnostic_data["repairable"] = bool(repairable_steps)
+    diagnostic_data["repairable_steps"] = repairable_steps
+    diagnostic_data["verification_status"] = verification_status
+    diagnostic_data["tests_found"] = (
+        False
+        if no_tests_found
+        else (None if not test_step or test_step.get("skipped") else True)
+    )
     report_path, json_path = output_paths(f"{project_path.name}_diagnostic")
     report_path.write_text(markdown, encoding="utf-8")
-    json_path.write_text(result_to_json(result), encoding="utf-8")
+    json_path.write_text(json.dumps(diagnostic_data, ensure_ascii=False, indent=2), encoding="utf-8")
     history_item = save_history("diagnose", project_path, "服务诊断", markdown, diagnostic_data)
     return {
         "ok": True,
@@ -679,6 +855,7 @@ ACTION_HANDLERS: dict[str, ActionHandler] = {
     "analyze": handle_analyze,
     "agent": handle_agent,
     "coding": handle_coding,
+    "coding_repair": handle_coding_repair,
     "ask": handle_ask,
     "diagnose": handle_diagnose,
     "ast": handle_ast,
@@ -802,13 +979,13 @@ JOB_MANAGER = JobManager()
 
 
 class WebUIHandler(BaseHTTPRequestHandler):
-    server_version = "ProjectAgentCppWeb/0.3.0"
+    server_version = "ProjectAgentCppWeb/0.4.0"
 
     def do_GET(self) -> None:
         path = unquote(urlsplit(self.path).path)
         try:
             if path == "/api/health":
-                json_response(self, {"ok": True, "root": str(ROOT), "version": "0.3.0"})
+                json_response(self, {"ok": True, "root": str(ROOT), "version": "0.4.0"})
                 return
             if path == "/api/history":
                 json_response(self, {"ok": True, "items": list_history()})

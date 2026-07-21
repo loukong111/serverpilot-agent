@@ -7,6 +7,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import threading
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -49,6 +50,7 @@ MAX_FILE_BYTES = 256 * 1024
 MAX_CONTEXT_BYTES = 80 * 1024
 MAX_PATCH_BYTES = 200 * 1024
 MAX_PATCH_FILES = 12
+_MUTATION_LOCK = threading.Lock()
 
 
 class CodingAgentError(RuntimeError):
@@ -202,6 +204,62 @@ def build_coding_messages(task: str, analysis: dict[str, Any], context: dict[str
     ]
 
 
+def diagnostic_failure_summary(diagnostic: dict[str, Any], max_chars: int = 16000) -> str:
+    sections: list[str] = []
+    for step in diagnostic.get("steps", []):
+        if step.get("success") or step.get("skipped"):
+            continue
+        command = " ".join(str(part) for part in step.get("command", []))
+        sections.extend(
+            [
+                f"STEP: {step.get('name', 'unknown')}",
+                f"COMMAND: {command}",
+                f"EXIT_CODE: {step.get('exit_code')}",
+                f"OBSERVATION: {step.get('observation', '')}",
+                "STDOUT:",
+                str(step.get("stdout") or "").strip(),
+                "STDERR:",
+                str(step.get("stderr") or "").strip(),
+            ]
+        )
+    summary = "\n".join(sections).strip()
+    if not summary:
+        raise CodingAgentError("诊断结果中没有可用于修复的失败步骤。")
+    if len(summary) > max_chars:
+        return summary[:max_chars] + "\n... diagnostic output truncated ..."
+    return summary
+
+
+def build_repair_messages(
+    task: str,
+    analysis: dict[str, Any],
+    context: dict[str, Any],
+    diagnostic: dict[str, Any],
+    parent: dict[str, Any],
+) -> list[dict[str, str]]:
+    messages = build_coding_messages(task, analysis, context)
+    messages[0]["content"] = (
+        "你是面向 C++ 服务端项目的 Coding Agent。上一轮补丁已经应用，但构建或测试失败。"
+        "根据真实诊断输出定位首个根因，生成最小修复补丁，不要撤销无关变更。"
+        "输出必须是单个 JSON 对象，不要使用 Markdown code fence。"
+    )
+    parent_summary = {
+        "id": parent.get("id"),
+        "round": parent.get("round", 1),
+        "summary": parent.get("summary"),
+        "files": parent.get("files", []),
+        "patch": str(parent.get("patch") or "")[:30000],
+    }
+    messages[1]["content"] += (
+        "\n\n上一轮修改：\n"
+        + json.dumps(parent_summary, ensure_ascii=False, indent=2)
+        + "\n\n失败诊断：\n"
+        + diagnostic_failure_summary(diagnostic)
+        + "\n\n只修复诊断暴露的根因。tests 字段应列出能够验证本轮修复的命令。"
+    )
+    return messages
+
+
 def parse_coding_response(content: str) -> dict[str, Any]:
     cleaned = content.strip()
     if cleaned.startswith("```"):
@@ -320,6 +378,11 @@ def save_proposal(
     task: str,
     proposal: dict[str, Any],
     context: dict[str, Any],
+    *,
+    kind: str = "change",
+    parent_id: str = "",
+    round_number: int = 1,
+    diagnostic_history_id: str = "",
 ) -> dict[str, Any]:
     proposal_dir.mkdir(parents=True, exist_ok=True)
     proposal_id = uuid.uuid4().hex
@@ -334,6 +397,10 @@ def save_proposal(
         "patch": proposal["patch"],
         "files": patch_paths(project_path, proposal["patch"]),
         "context_files": [item["path"] for item in context.get("files", [])],
+        "kind": kind,
+        "parent_id": parent_id,
+        "round": round_number,
+        "diagnostic_history_id": diagnostic_history_id,
         "status": "pending",
         "created_at": _now(),
     }
@@ -371,6 +438,13 @@ def _sha256(path: Path) -> str:
 
 
 def apply_proposal(proposal_dir: Path, backup_dir: Path, proposal_id: str) -> dict[str, Any]:
+    with _MUTATION_LOCK:
+        return _apply_proposal_unlocked(proposal_dir, backup_dir, proposal_id)
+
+
+def _apply_proposal_unlocked(
+    proposal_dir: Path, backup_dir: Path, proposal_id: str
+) -> dict[str, Any]:
     record = load_proposal(proposal_dir, proposal_id)
     if record.get("status") != "pending":
         raise CodingAgentError(f"当前修改方案状态为 {record.get('status')}，不能重复应用。")
@@ -424,6 +498,11 @@ def apply_proposal(proposal_dir: Path, backup_dir: Path, proposal_id: str) -> di
 
 
 def rollback_proposal(proposal_dir: Path, proposal_id: str) -> dict[str, Any]:
+    with _MUTATION_LOCK:
+        return _rollback_proposal_unlocked(proposal_dir, proposal_id)
+
+
+def _rollback_proposal_unlocked(proposal_dir: Path, proposal_id: str) -> dict[str, Any]:
     record = load_proposal(proposal_dir, proposal_id)
     if record.get("status") != "applied":
         raise CodingAgentError(f"当前修改方案状态为 {record.get('status')}，不能回滚。")

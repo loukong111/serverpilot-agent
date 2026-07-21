@@ -45,6 +45,7 @@ def main() -> int:
 
     health = request_json(args.base_url, "/api/health")
     require(health.get("ok") is True, "health check failed")
+    require(health.get("version") == "0.4.0", f"unexpected server version: {health.get('version')}")
     print("health: ok")
 
     unavailable_llm = {
@@ -76,6 +77,13 @@ def main() -> int:
 
     diagnose = run_job(args.base_url, "diagnose", {**common, "mode": "dry"})
     require(diagnose["status"] == "completed", f"diagnose failed: {diagnose['error']}")
+    require(diagnose["result"]["diagnostic"]["success"] is True, "dry diagnosis status is missing")
+    require(diagnose["result"]["diagnostic"]["failed_steps"] == [], "dry diagnosis has failed steps")
+    require(
+        diagnose["result"]["diagnostic"]["verification_status"] == "incomplete",
+        "dry diagnosis should not claim complete verification",
+    )
+    require(diagnose["result"]["diagnostic"]["tests_found"] is None, "skipped tests should be unknown")
     print("diagnose dry run: ok")
 
     ast = run_job(

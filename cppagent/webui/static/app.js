@@ -1,7 +1,15 @@
 const state = {
   activeJobId: null,
   activeProposal: null,
+  lastDiagnostic: null,
   busy: false,
+  taskMode: "coding",
+  taskDrafts: {
+    analysis: "分析项目架构、核心模块、工程亮点和潜在风险",
+    coding: "为项目补充一个小型功能，并添加对应单元测试",
+    diagnosis: "构建项目并运行测试，定位失败原因",
+  },
+  confirmResolver: null,
   lastJson: {},
   lastMarkdown: "",
   talkScripts: {},
@@ -16,7 +24,17 @@ function setStatus(text) {
 
 function setBusy(busy) {
   state.busy = busy;
-  ["analyzeBtn", "agentBtn", "codingBtn", "diagnoseBtn", "astBtn", "askBtn", "clearBtn"].forEach((id) => {
+  [
+    "analyzeBtn",
+    "agentBtn",
+    "codingBtn",
+    "diagnoseBtn",
+    "astBtn",
+    "askBtn",
+    "clearBtn",
+    "runAgentBtn",
+    "newTaskBtn",
+  ].forEach((id) => {
     $(id).disabled = busy;
   });
   updateProposalActions();
@@ -107,29 +125,137 @@ function renderMarkdown(markdown) {
   return html.join("\n");
 }
 
-function showOutputView(viewId) {
-  document.querySelectorAll(".output-view").forEach((view) => {
+function showMainView(viewId) {
+  document.querySelectorAll(".main-output-view").forEach((view) => {
     const active = view.id === viewId;
     view.classList.toggle("active", active);
     view.hidden = !active;
   });
-  document.querySelectorAll(".output-tab").forEach((tab) => {
+  document.querySelectorAll(".main-output-tab").forEach((tab) => {
     const active = tab.dataset.view === viewId;
     tab.classList.toggle("active", active);
     tab.setAttribute("aria-selected", String(active));
+    tab.tabIndex = active ? 0 : -1;
   });
 }
 
-function showWorkflow(panelId) {
-  document.querySelectorAll(".workflow-panel").forEach((panel) => {
-    const active = panel.id === panelId;
-    panel.classList.toggle("active", active);
-    panel.hidden = !active;
+function showDetailView(viewId) {
+  document.querySelectorAll(".detail-view").forEach((view) => {
+    const active = view.id === viewId;
+    view.classList.toggle("active", active);
+    view.hidden = !active;
   });
-  document.querySelectorAll(".workflow-tab").forEach((tab) => {
-    const active = tab.dataset.workflow === panelId;
+  document.querySelectorAll(".detail-tab").forEach((tab) => {
+    const active = tab.dataset.detailView === viewId;
     tab.classList.toggle("active", active);
     tab.setAttribute("aria-selected", String(active));
+    tab.tabIndex = active ? 0 : -1;
+  });
+}
+
+function openDetails(viewId = "logView") {
+  showDetailView(viewId);
+  $("detailsDrawer").hidden = false;
+  $("drawerBackdrop").hidden = false;
+  document.body.classList.add("drawer-open");
+  $("closeDetailsBtn").focus();
+}
+
+function closeDetails() {
+  $("detailsDrawer").hidden = true;
+  $("drawerBackdrop").hidden = true;
+  document.body.classList.remove("drawer-open");
+}
+
+function showOutputView(viewId) {
+  if (["logView", "traceView", "jsonView"].includes(viewId)) {
+    openDetails(viewId);
+  } else {
+    showMainView(viewId);
+  }
+}
+
+const taskModeConfig = {
+  analysis: {
+    button: "开始项目分析",
+    hint: "扫描工程结构和源码，生成架构、亮点、风险与面试讲法。",
+    placeholder: "描述希望重点分析的模块或问题",
+  },
+  coding: {
+    button: "生成修改方案",
+    hint: "检索相关源码并生成候选 Diff，应用前需要确认。",
+    placeholder: "描述需要实现或修复的代码任务",
+  },
+  diagnosis: {
+    button: "开始项目诊断",
+    hint: "使用项目设置中的参数执行构建与测试，并整理失败原因。",
+    placeholder: "描述需要验证的构建或运行问题",
+  },
+};
+
+function setTaskMode(mode, { preserveCurrent = true } = {}) {
+  const config = taskModeConfig[mode];
+  if (!config) return;
+  const input = $("codingTask");
+  if (preserveCurrent && state.taskMode && state.taskMode !== mode) {
+    state.taskDrafts[state.taskMode] = input.value;
+  }
+  state.taskMode = mode;
+  input.value = state.taskDrafts[mode] || "";
+  input.placeholder = config.placeholder;
+  $("modeHint").textContent = config.hint;
+  $("runAgentBtn").textContent = config.button;
+  document.querySelectorAll(".mode-button").forEach((button) => {
+    const active = button.dataset.taskMode === mode;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  });
+}
+
+function openDialog(dialogId) {
+  const dialog = $(dialogId);
+  if (!dialog.open) dialog.showModal();
+}
+
+function closeDialog(dialogId) {
+  const dialog = $(dialogId);
+  if (dialog.open) dialog.close();
+}
+
+function finishConfirmation(accepted) {
+  const resolver = state.confirmResolver;
+  state.confirmResolver = null;
+  closeDialog("confirmDialog");
+  if (resolver) resolver(accepted);
+}
+
+function confirmAction(title, message, acceptLabel = "确认", danger = false) {
+  if (state.confirmResolver) state.confirmResolver(false);
+  $("confirmTitle").textContent = title;
+  $("confirmMessage").textContent = message;
+  $("confirmAcceptBtn").textContent = acceptLabel;
+  $("confirmAcceptBtn").classList.toggle("danger", danger);
+  $("confirmAcceptBtn").classList.toggle("primary", !danger);
+  openDialog("confirmDialog");
+  return new Promise((resolve) => {
+    state.confirmResolver = resolve;
+  });
+}
+
+function bindTabKeyboard(selector) {
+  const tabs = [...document.querySelectorAll(selector)];
+  tabs.forEach((tab, index) => {
+    tab.addEventListener("keydown", (event) => {
+      let targetIndex = null;
+      if (["ArrowRight", "ArrowDown"].includes(event.key)) targetIndex = (index + 1) % tabs.length;
+      else if (["ArrowLeft", "ArrowUp"].includes(event.key)) targetIndex = (index - 1 + tabs.length) % tabs.length;
+      else if (event.key === "Home") targetIndex = 0;
+      else if (event.key === "End") targetIndex = tabs.length - 1;
+      if (targetIndex === null) return;
+      event.preventDefault();
+      tabs[targetIndex].focus();
+      tabs[targetIndex].click();
+    });
   });
 }
 
@@ -217,9 +343,17 @@ function renderDiff(patch) {
 
 function updateProposalActions() {
   const status = state.activeProposal?.status;
+  const diagnostic = state.lastDiagnostic?.diagnostic;
+  const sameProject = diagnostic?.project_path === state.activeProposal?.project_path;
+  const canRepair =
+    sameProject &&
+    diagnostic?.success === false &&
+    diagnostic?.repairable === true &&
+    Number(state.activeProposal?.round || 1) < 5;
   $("applyPatchBtn").disabled = state.busy || status !== "pending";
   $("rollbackPatchBtn").disabled = state.busy || status !== "applied";
   $("verifyPatchBtn").disabled = state.busy || status !== "applied";
+  $("repairPatchBtn").disabled = state.busy || status !== "applied" || !canRepair;
 }
 
 function renderProposal(proposal) {
@@ -236,7 +370,26 @@ function renderProposal(proposal) {
     applied: "补丁已应用，可构建测试或回滚",
     rolled_back: "补丁已回滚",
   };
-  $("proposalStatus").textContent = labels[proposal.status] || proposal.status;
+  const round = Number(proposal.round || 1);
+  let statusText = labels[proposal.status] || proposal.status;
+  if (proposal.kind === "repair" && proposal.status === "pending") {
+    statusText = `第 ${round} 轮修复待审核`;
+  } else if (
+    proposal.status === "applied" &&
+    state.lastDiagnostic?.diagnostic?.project_path === proposal.project_path
+  ) {
+    const verification = state.lastDiagnostic.diagnostic.verification_status;
+    if (verification === "passed") {
+      statusText = `第 ${round} 轮修改已通过构建测试`;
+    } else if (verification === "incomplete") {
+      statusText = `第 ${round} 轮构建完成，但没有执行有效测试`;
+    } else if (state.lastDiagnostic.diagnostic.repairable) {
+      statusText = `第 ${round} 轮修改构建失败，可分析错误`;
+    } else {
+      statusText = `第 ${round} 轮运行诊断失败，请检查环境或参数`;
+    }
+  }
+  $("proposalStatus").textContent = statusText;
   renderDiff(proposal.patch);
   updateProposalActions();
 }
@@ -282,6 +435,7 @@ function analysisPayload() {
   return {
     ...projectPayload(),
     ...llmPayload(),
+    task: $("codingTask").value.trim(),
     use_llm: $("useLlm").checked,
     style: $("reportStyle").value,
   };
@@ -293,9 +447,35 @@ function codingPayload() {
   return {
     ...projectPayload(),
     task,
+    ...codingLlmPayload(),
+  };
+}
+
+function codingLlmPayload() {
+  return {
     model: $("codingModelName").value.trim() || $("modelName").value.trim(),
     api_key: $("codingApiKey").value.trim() || $("apiKey").value.trim(),
     base_url: $("codingBaseUrl").value.trim() || $("baseUrl").value.trim(),
+  };
+}
+
+function repairPayload() {
+  const proposal = state.activeProposal;
+  const diagnostic = state.lastDiagnostic;
+  if (!proposal || proposal.status !== "applied") throw new Error("当前没有可修复的已应用补丁");
+  if (
+    !diagnostic?.history_item?.id ||
+    diagnostic.diagnostic?.success !== false ||
+    diagnostic.diagnostic?.repairable !== true
+  ) {
+    throw new Error("当前没有失败的构建诊断");
+  }
+  return {
+    ...projectPayload(),
+    ...codingLlmPayload(),
+    task: proposal.task,
+    proposal_id: proposal.id,
+    diagnostic_history_id: diagnostic.history_item.id,
   };
 }
 
@@ -313,6 +493,7 @@ function diagnosePayload() {
   const mode = $("diagnoseMode").value;
   return {
     ...projectPayload(),
+    task: $("codingTask").value.trim(),
     mode,
     cmake_args: mode === "dry" ? [] : splitArgs($("cmakeArgs").value),
     build_args: splitArgs($("buildArgs").value),
@@ -358,7 +539,8 @@ function applyJobResult(action, result) {
     renderTrace(result.trace);
     setJson({ analysis: result.analysis, trace: result.trace });
     showOutputView("traceView");
-  } else if (action === "coding") {
+  } else if (action === "coding" || action === "coding_repair") {
+    state.lastDiagnostic = null;
     renderTalkScripts({});
     renderProposal(result.proposal);
     setReport(result.markdown);
@@ -370,9 +552,26 @@ function applyJobResult(action, result) {
     setReport(`${notice}${result.markdown}`);
     setJson({ llm_requested: result.llm_requested, used_llm: result.used_llm, llm_warning: result.llm_warning, report_path: result.report_path });
   } else if (action === "diagnose") {
+    state.lastDiagnostic = {
+      diagnostic: result.diagnostic,
+      history_item: result.history_item,
+    };
     renderTalkScripts({});
     setReport(result.markdown);
     setJson(result.diagnostic);
+    if (state.activeProposal) renderProposal(state.activeProposal);
+    const sameProject = result.diagnostic.project_path === state.activeProposal?.project_path;
+    const canContinue = Number(state.activeProposal?.round || 1) < 5;
+    if (
+      result.diagnostic.success === false &&
+      result.diagnostic.repairable === true &&
+      state.activeProposal?.status === "applied" &&
+      sameProject &&
+      canContinue &&
+      $("codingAutoLoop").checked
+    ) {
+      return { action: "coding_repair", payloadFactory: repairPayload, label: "生成修复方案" };
+    }
   } else if (action === "ast") {
     renderTalkScripts({});
     setReport(result.markdown);
@@ -386,6 +585,7 @@ async function runJob(action, payload, label) {
   setBusy(true);
   setStatus(`${label}运行中`);
   $("jobPanel").hidden = false;
+  let followUp = null;
   try {
     const started = await postJson("/api/jobs", { action, payload });
     const jobId = started.job.id;
@@ -398,7 +598,7 @@ async function runJob(action, payload, label) {
       const job = response.job;
       renderJob(job, label);
       if (job.status === "completed") {
-        applyJobResult(action, job.result);
+        followUp = applyJobResult(action, job.result);
         setStatus(job.result.llm_warning ? `${label}完成，已使用离线结果` : `${label}完成`);
         await loadHistory();
         break;
@@ -420,12 +620,19 @@ async function runJob(action, payload, label) {
     setBusy(false);
     $("cancelBtn").disabled = true;
   }
+  if (followUp) {
+    window.setTimeout(
+      () => startAction(followUp.action, followUp.payloadFactory, followUp.label),
+      0,
+    );
+  }
 }
 
 const historyLabels = {
   analyze: "项目分析",
   agent: "Agent Trace",
   coding: "代码修改方案",
+  coding_repair: "代码修复方案",
   ask: "面试问答",
   diagnose: "项目诊断",
   ast: "Clang AST",
@@ -479,7 +686,7 @@ async function openHistory(itemId) {
     renderTalkScripts(scripts);
     if (data.item.action === "agent") {
       renderTrace(data.data.trace);
-    } else if (data.item.action === "coding") {
+    } else if (["coding", "coding_repair"].includes(data.item.action)) {
       let proposal = data.data.proposal;
       try {
         const current = await requestJson(`/api/coding/proposals/${encodeURIComponent(proposal.id)}`);
@@ -490,6 +697,9 @@ async function openHistory(itemId) {
       renderProposal(proposal);
       renderTrace(data.data.trace);
       showOutputView("diffView");
+    } else if (data.item.action === "diagnose") {
+      state.lastDiagnostic = { diagnostic: data.data, history_item: data.item };
+      if (state.activeProposal) renderProposal(state.activeProposal);
     }
     setStatus("历史记录已打开");
   } catch (error) {
@@ -500,12 +710,19 @@ async function openHistory(itemId) {
 
 function clearOutput() {
   $("reportOutput").classList.add("empty-state");
-  $("reportOutput").textContent = "等待分析结果";
+  $("reportOutput").innerHTML = "<h3>从一个任务开始</h3><p>选择模式并描述目标，Agent 会在这里整理计划、报告和验证结果。</p>";
   $("traceOutput").classList.add("empty-state");
   $("traceOutput").textContent = "等待 Agent Trace";
+  $("jobLog").textContent = "暂无运行日志";
+  $("jobPanel").hidden = true;
+  state.lastJson = {};
+  state.lastMarkdown = "";
+  state.lastDiagnostic = null;
   renderProposal(null);
   renderTalkScripts({});
   $("jsonOutput").textContent = "{}";
+  showMainView("reportView");
+  closeDetails();
   setStatus("就绪");
 }
 
@@ -517,6 +734,7 @@ const preferenceIds = [
   "useLlm",
   "codingModelName",
   "codingBaseUrl",
+  "codingAutoLoop",
 ];
 
 function savePreferences() {
@@ -542,6 +760,14 @@ function loadPreferences() {
   }
 }
 
+function updateProjectDisplay() {
+  const path = $("projectPath").value.trim().replace(/\/+$/, "");
+  const name = path.split("/").filter(Boolean).at(-1) || "未选择项目";
+  $("sidebarProjectName").textContent = name;
+  $("sidebarProjectPath").textContent = path || "请选择项目路径";
+  $("headerProjectName").textContent = name;
+}
+
 function startAction(action, payloadFactory, label) {
   try {
     runJob(action, payloadFactory(), label);
@@ -558,14 +784,18 @@ $("codingBtn").addEventListener("click", () =>
 );
 
 $("agentBtn").addEventListener("click", () =>
-  startAction(
-    "agent",
-    () => ({ ...projectPayload(), task: $("agentTask").value.trim() }),
-    "Agent Trace",
-  ),
+  {
+    closeDialog("toolsDialog");
+    startAction(
+      "agent",
+      () => ({ ...projectPayload(), task: $("agentTask").value.trim() }),
+      "Agent Trace",
+    );
+  },
 );
 
-$("askBtn").addEventListener("click", () =>
+$("askBtn").addEventListener("click", () => {
+  closeDialog("interviewDialog");
   startAction(
     "ask",
     () => ({
@@ -575,14 +805,19 @@ $("askBtn").addEventListener("click", () =>
       question: $("question").value.trim(),
     }),
     "面试回答",
-  ),
-);
+  );
+});
 
-$("diagnoseBtn").addEventListener("click", () => {
+$("diagnoseBtn").addEventListener("click", async () => {
   try {
     const payload = diagnosePayload();
-    if ((payload.start_command || payload.benchmark_command) && !window.confirm("诊断将执行你填写的本地命令，确认继续吗？")) {
-      return;
+    if (payload.start_command || payload.benchmark_command) {
+      const accepted = await confirmAction(
+        "执行本地命令",
+        "诊断会运行项目设置中填写的服务启动或压测命令。请确认这些命令来自可信项目。",
+        "继续诊断",
+      );
+      if (!accepted) return;
     }
     startAction("diagnose", () => payload, "项目诊断");
   } catch (error) {
@@ -591,36 +826,59 @@ $("diagnoseBtn").addEventListener("click", () => {
   }
 });
 
-$("astBtn").addEventListener("click", () => startAction("ast", astPayload, "Clang AST"));
+$("astBtn").addEventListener("click", () => {
+  closeDialog("toolsDialog");
+  startAction("ast", astPayload, "Clang AST");
+});
 
 $("applyPatchBtn").addEventListener("click", async () => {
   const proposal = state.activeProposal;
   if (!proposal || proposal.status !== "pending") return;
-  if (!window.confirm(`确认应用补丁并修改 ${proposal.files.length} 个文件吗？`)) return;
+  const accepted = await confirmAction(
+    "应用候选补丁",
+    `这会直接修改项目中的 ${proposal.files.length} 个文件。应用后可以构建测试或回滚。`,
+    "应用补丁",
+  );
+  if (!accepted) return;
+  let autoTest = false;
   setBusy(true);
   setStatus("正在应用补丁");
   try {
     const result = await postJson("/api/coding/apply", { proposal_id: proposal.id });
+    state.lastDiagnostic = null;
     renderProposal(result.proposal);
     setReport(result.markdown);
     setJson({ proposal: result.proposal });
     setStatus("补丁已应用");
+    autoTest = $("codingAutoLoop").checked;
   } catch (error) {
     setStatus("补丁应用失败");
     setReport(`# 补丁应用失败\n\n- ${error.message}`);
   } finally {
     setBusy(false);
   }
+  if (autoTest) {
+    $("diagnoseMode").value = "build-test";
+    setTaskMode("diagnosis");
+    window.setTimeout(() => startAction("diagnose", diagnosePayload, "构建测试"), 0);
+  }
 });
 
 $("rollbackPatchBtn").addEventListener("click", async () => {
   const proposal = state.activeProposal;
   if (!proposal || proposal.status !== "applied") return;
-  if (!window.confirm("确认恢复补丁应用前的文件状态吗？")) return;
+  const accepted = await confirmAction(
+    "回滚项目修改",
+    "项目文件将恢复到应用这份补丁之前的状态。",
+    "确认回滚",
+    true,
+  );
+  if (!accepted) return;
   setBusy(true);
   setStatus("正在回滚修改");
   try {
     const result = await postJson("/api/coding/rollback", { proposal_id: proposal.id });
+    state.lastDiagnostic = null;
     renderProposal(result.proposal);
     setReport(result.markdown);
     setJson({ proposal: result.proposal });
@@ -633,9 +891,15 @@ $("rollbackPatchBtn").addEventListener("click", async () => {
   }
 });
 
+$("repairPatchBtn").addEventListener("click", () =>
+  startAction("coding_repair", repairPayload, "生成修复方案"),
+);
+
 $("verifyPatchBtn").addEventListener("click", () => {
+  state.lastDiagnostic = null;
+  renderProposal(state.activeProposal);
   $("diagnoseMode").value = "build-test";
-  showWorkflow("diagnosisPanel");
+  setTaskMode("diagnosis");
   startAction("diagnose", diagnosePayload, "构建测试");
 });
 
@@ -662,15 +926,79 @@ $("historyList").addEventListener("click", (event) => {
   if (button) openHistory(button.dataset.historyId);
 });
 
-document.querySelectorAll(".output-tab").forEach((tab) => {
-  tab.addEventListener("click", () => showOutputView(tab.dataset.view));
+document.querySelectorAll(".main-output-tab").forEach((tab) => {
+  tab.addEventListener("click", () => showMainView(tab.dataset.view));
 });
 
-document.querySelectorAll(".workflow-tab").forEach((tab) => {
-  tab.addEventListener("click", () => showWorkflow(tab.dataset.workflow));
+document.querySelectorAll(".detail-tab").forEach((tab) => {
+  tab.addEventListener("click", () => showDetailView(tab.dataset.detailView));
 });
+
+document.querySelectorAll(".mode-button").forEach((button) => {
+  button.addEventListener("click", () => setTaskMode(button.dataset.taskMode));
+});
+
+$("runAgentBtn").addEventListener("click", () => {
+  state.taskDrafts[state.taskMode] = $("codingTask").value;
+  const actionButtons = {
+    analysis: "analyzeBtn",
+    coding: "codingBtn",
+    diagnosis: "diagnoseBtn",
+  };
+  $(actionButtons[state.taskMode]).click();
+});
+
+$("newTaskBtn").addEventListener("click", () => {
+  state.taskDrafts = {
+    analysis: "分析项目架构、核心模块、工程亮点和潜在风险",
+    coding: "为项目补充一个小型功能，并添加对应单元测试",
+    diagnosis: "构建项目并运行测试，定位失败原因",
+  };
+  setTaskMode("coding", { preserveCurrent: false });
+  clearOutput();
+  $("codingTask").focus();
+});
+
+$("openProjectBtn").addEventListener("click", () => openDialog("projectDialog"));
+$("openSettingsBtn").addEventListener("click", () => openDialog("settingsDialog"));
+$("openSettingsTopBtn").addEventListener("click", () => openDialog("settingsDialog"));
+$("openInterviewBtn").addEventListener("click", () => openDialog("interviewDialog"));
+$("openToolsBtn").addEventListener("click", () => openDialog("toolsDialog"));
+$("openDetailsBtn").addEventListener("click", () => openDetails("logView"));
+$("openLogBtn").addEventListener("click", () => openDetails("logView"));
+$("closeDetailsBtn").addEventListener("click", closeDetails);
+$("drawerBackdrop").addEventListener("click", closeDetails);
+
+document.querySelectorAll("[data-close-dialog]").forEach((button) => {
+  button.addEventListener("click", () => {
+    savePreferences();
+    updateProjectDisplay();
+    closeDialog(button.dataset.closeDialog);
+  });
+});
+
+$("confirmCancelBtn").addEventListener("click", () => finishConfirmation(false));
+$("confirmAcceptBtn").addEventListener("click", () => finishConfirmation(true));
+$("confirmDialog").addEventListener("cancel", (event) => {
+  event.preventDefault();
+  finishConfirmation(false);
+});
+
+$("projectPath").addEventListener("input", updateProjectDisplay);
+$("codingTask").addEventListener("input", () => {
+  state.taskDrafts[state.taskMode] = $("codingTask").value;
+});
+
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !$("detailsDrawer").hidden) closeDetails();
+});
+
+bindTabKeyboard(".main-output-tab");
+bindTabKeyboard(".detail-tab");
 
 preferenceIds.forEach((id) => $(id).addEventListener("change", savePreferences));
 
 loadPreferences();
+updateProjectDisplay();
+setTaskMode("coding", { preserveCurrent: false });
 loadHistory();

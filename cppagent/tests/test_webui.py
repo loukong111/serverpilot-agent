@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from agent.project_agent.diagnostics import DiagnosticResult, DiagnosticStep
 from agent.project_agent.llm_client import LLMConfigurationError, LLMRequestError
 from webui import server
 
@@ -137,6 +138,160 @@ class WebUIFallbackTest(unittest.TestCase):
         rolled_back = server.handle_coding_rollback({"proposal_id": proposed["proposal"]["id"]})
         self.assertEqual("rolled_back", rolled_back["proposal"]["status"])
         self.assertIn("return 1", self.source.read_text(encoding="utf-8"))
+
+    @mock.patch.object(server, "get_analysis", return_value=SAMPLE_ANALYSIS)
+    @mock.patch.object(server.LLMClient, "chat")
+    def test_failed_diagnostic_creates_chained_repair_proposal(
+        self, chat: mock.Mock, _analysis: mock.Mock
+    ) -> None:
+        first_patch = (
+            "diff --git a/src/value.cpp b/src/value.cpp\n"
+            "--- a/src/value.cpp\n+++ b/src/value.cpp\n"
+            "@@ -1 +1 @@\n"
+            "-int value() { return 1; }\n+int value() { return 2; }\n"
+        )
+        chat.return_value = json.dumps(
+            {
+                "summary": "第一轮修改",
+                "plan": ["修改返回值"],
+                "risks": [],
+                "tests": ["cmake --build build"],
+                "patch": first_patch,
+            },
+            ensure_ascii=False,
+        )
+        proposed = server.handle_coding(
+            {
+                "project_path": str(self.project),
+                "task": "修改 value",
+                "model": "test-model",
+                "api_key": "test-key",
+            }
+        )
+        parent_id = proposed["proposal"]["id"]
+        server.handle_coding_apply({"proposal_id": parent_id})
+
+        diagnostic = {
+            "project_path": str(self.project),
+            "build_dir": str(self.root / "build"),
+            "success": False,
+            "failed_steps": ["build"],
+            "steps": [
+                {
+                    "name": "build",
+                    "command": ["cmake", "--build", "build"],
+                    "success": False,
+                    "skipped": False,
+                    "exit_code": 2,
+                    "stdout": "",
+                    "stderr": "value.cpp: expected return value 3",
+                    "observation": "command failed",
+                }
+            ],
+        }
+        diagnostic_history = server.save_history(
+            "diagnose",
+            self.project,
+            "项目诊断",
+            "# 构建失败\n",
+            diagnostic,
+        )
+        repair_patch = (
+            "diff --git a/src/value.cpp b/src/value.cpp\n"
+            "--- a/src/value.cpp\n+++ b/src/value.cpp\n"
+            "@@ -1 +1 @@\n"
+            "-int value() { return 2; }\n+int value() { return 3; }\n"
+        )
+        chat.return_value = json.dumps(
+            {
+                "summary": "修复构建错误",
+                "plan": ["根据编译错误调整实现"],
+                "risks": [],
+                "tests": ["cmake --build build"],
+                "patch": repair_patch,
+            },
+            ensure_ascii=False,
+        )
+
+        repair = server.handle_coding_repair(
+            {
+                "project_path": str(self.project),
+                "proposal_id": parent_id,
+                "diagnostic_history_id": diagnostic_history["id"],
+                "model": "test-model",
+                "api_key": "test-key",
+            }
+        )
+        repair_id = repair["proposal"]["id"]
+        self.assertEqual("repair", repair["proposal"]["kind"])
+        self.assertEqual(2, repair["proposal"]["round"])
+        self.assertEqual(parent_id, repair["proposal"]["parent_id"])
+
+        server.handle_coding_apply({"proposal_id": repair_id})
+        self.assertIn("return 3", self.source.read_text(encoding="utf-8"))
+        server.handle_coding_rollback({"proposal_id": repair_id})
+        self.assertIn("return 2", self.source.read_text(encoding="utf-8"))
+        server.handle_coding_rollback({"proposal_id": parent_id})
+        self.assertIn("return 1", self.source.read_text(encoding="utf-8"))
+
+    @mock.patch.object(server, "run_diagnostics")
+    def test_diagnostic_result_exposes_top_level_failure(self, run: mock.Mock) -> None:
+        run.return_value = DiagnosticResult(
+            project_path=str(self.project),
+            build_dir=str(self.root / "build"),
+            steps=[
+                DiagnosticStep(
+                    name="build",
+                    command=["cmake", "--build", "build"],
+                    success=False,
+                    exit_code=2,
+                    stderr="compile failed",
+                    observation="command failed",
+                )
+            ],
+        )
+        result = server.handle_diagnose({"project_path": str(self.project), "mode": "build-test"})
+
+        self.assertFalse(result["diagnostic"]["success"])
+        self.assertEqual(["build"], result["diagnostic"]["failed_steps"])
+        self.assertTrue(result["diagnostic"]["repairable"])
+        self.assertEqual("failed", result["diagnostic"]["verification_status"])
+
+    @mock.patch.object(server, "run_diagnostics")
+    def test_no_ctest_cases_are_reported_as_incomplete(self, run: mock.Mock) -> None:
+        run.return_value = DiagnosticResult(
+            project_path=str(self.project),
+            build_dir=str(self.root / "build"),
+            steps=[
+                DiagnosticStep(name="configure", success=True),
+                DiagnosticStep(name="build", success=True),
+                DiagnosticStep(name="test", success=True, stdout="No tests were found!!!"),
+            ],
+        )
+        result = server.handle_diagnose({"project_path": str(self.project), "mode": "build-test"})
+
+        self.assertTrue(result["diagnostic"]["success"])
+        self.assertFalse(result["diagnostic"]["tests_found"])
+        self.assertFalse(result["diagnostic"]["repairable"])
+        self.assertEqual("incomplete", result["diagnostic"]["verification_status"])
+
+    @mock.patch.object(server, "run_diagnostics")
+    def test_benchmark_failure_does_not_trigger_code_repair(self, run: mock.Mock) -> None:
+        run.return_value = DiagnosticResult(
+            project_path=str(self.project),
+            build_dir=str(self.root / "build"),
+            steps=[
+                DiagnosticStep(name="configure", success=True),
+                DiagnosticStep(name="build", success=True),
+                DiagnosticStep(name="test", success=True, stdout="100% tests passed"),
+                DiagnosticStep(name="benchmark", success=False, exit_code=1),
+            ],
+        )
+        result = server.handle_diagnose({"project_path": str(self.project), "mode": "build-test"})
+
+        self.assertFalse(result["diagnostic"]["success"])
+        self.assertFalse(result["diagnostic"]["repairable"])
+        self.assertEqual([], result["diagnostic"]["repairable_steps"])
 
 
 if __name__ == "__main__":
