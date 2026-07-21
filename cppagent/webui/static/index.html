@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>ProjectAgentCpp</title>
     <link rel="icon" href="data:," />
-    <link rel="stylesheet" href="/styles.css?v=0.5.0" />
+    <link rel="stylesheet" href="/styles.css?v=0.6.5" />
   </head>
   <body>
     <main class="app-shell">
@@ -68,7 +68,7 @@
             </div>
           </div>
           <label class="sr-only" for="codingTask">任务描述</label>
-          <textarea id="codingTask" rows="4">为项目补充一个小型功能，并添加对应单元测试</textarea>
+          <textarea id="codingTask" rows="4" placeholder="例如：为配置解析增加端口范围校验，并补充单元测试"></textarea>
           <div class="composer-footer">
             <p id="modeHint">Agent 将检索相关源码、生成候选 Diff，并等待确认。</p>
             <button id="runAgentBtn" class="primary run-button" type="button">生成修改方案</button>
@@ -159,11 +159,15 @@
       </header>
       <nav class="detail-tabs" role="tablist" aria-label="运行详情视图">
         <button id="logTab" class="detail-tab active" type="button" role="tab" aria-selected="true" aria-controls="logView" data-detail-view="logView">日志</button>
+        <button id="detailReportTab" class="detail-tab" type="button" role="tab" aria-selected="false" aria-controls="detailReportView" data-detail-view="detailReportView" tabindex="-1">报告</button>
         <button id="traceTab" class="detail-tab" type="button" role="tab" aria-selected="false" aria-controls="traceView" data-detail-view="traceView" tabindex="-1">Trace</button>
         <button id="jsonTab" class="detail-tab" type="button" role="tab" aria-selected="false" aria-controls="jsonView" data-detail-view="jsonView" tabindex="-1">JSON</button>
       </nav>
       <section id="logView" class="detail-view active" role="tabpanel" aria-labelledby="logTab">
         <pre id="jobLog" class="job-log">暂无运行日志</pre>
+      </section>
+      <section id="detailReportView" class="detail-view" role="tabpanel" aria-labelledby="detailReportTab" hidden>
+        <div id="detailReportOutput" class="markdown detail-report empty-state"><p>暂无详细报告</p></div>
       </section>
       <section id="traceView" class="detail-view" role="tabpanel" aria-labelledby="traceTab" hidden>
         <div id="traceOutput" class="trace empty-state">等待 Agent Trace</div>
@@ -182,17 +186,43 @@
         <button class="quiet" type="button" data-close-dialog="settingsDialog">关闭</button>
       </div>
       <div class="dialog-body form-grid">
-        <label class="field" for="modelName">
+        <section class="provider-section" aria-labelledby="providerLabel">
+          <p id="providerLabel" class="field-label">服务来源</p>
+          <div class="provider-switch" role="radiogroup" aria-labelledby="providerLabel">
+            <button class="provider-button active" type="button" role="radio" aria-checked="true" data-provider="ollama">本地免费</button>
+            <button class="provider-button" type="button" role="radio" aria-checked="false" data-provider="openrouter">免费云端</button>
+            <button class="provider-button" type="button" role="radio" aria-checked="false" data-provider="custom">自定义</button>
+          </div>
+          <input id="llmProvider" type="hidden" value="ollama" />
+          <div id="providerStatus" class="provider-status checking" aria-live="polite">
+            <span class="provider-indicator" aria-hidden="true"></span>
+            <div>
+              <strong id="providerStatusTitle">正在检测 Ollama</strong>
+              <p id="providerStatusDetail">检查本地免费模型服务</p>
+            </div>
+            <div class="provider-status-actions">
+              <a id="providerHelpLink" href="https://ollama.com/download" target="_blank" rel="noreferrer">获取 Ollama</a>
+              <button id="checkProviderBtn" class="quiet small" type="button">重新检测</button>
+            </div>
+          </div>
+        </section>
+        <p id="settingsNotice" class="form-notice" role="alert" hidden></p>
+        <label id="modelField" class="field" for="modelName">
           <span>模型</span>
-          <input id="modelName" placeholder="PROJECTAGENTCPP_MODEL" spellcheck="false" />
+          <input id="modelName" value="qwen2.5-coder:1.5b" placeholder="填写模型名称" list="ollamaModels" spellcheck="false" />
+          <datalist id="ollamaModels"></datalist>
         </label>
-        <label class="field" for="apiKey">
+        <label id="codingModelField" class="field" for="codingModelName">
+          <span>代码修改模型</span>
+          <input id="codingModelName" value="qwen2.5-coder:3b" placeholder="填写模型名称" list="ollamaModels" spellcheck="false" />
+        </label>
+        <label id="apiKeyField" class="field" for="apiKey" hidden>
           <span>API Key</span>
-          <input id="apiKey" type="password" placeholder="OPENAI_API_KEY" autocomplete="off" spellcheck="false" />
+          <input id="apiKey" type="password" placeholder="填写 API Key" autocomplete="off" spellcheck="false" />
         </label>
-        <label class="field" for="baseUrl">
+        <label id="baseUrlField" class="field" for="baseUrl" hidden>
           <span>Base URL</span>
-          <input id="baseUrl" value="https://api.openai.com/v1" spellcheck="false" />
+          <input id="baseUrl" value="http://127.0.0.1:11434/v1" spellcheck="false" />
         </label>
         <label class="field" for="reportStyle">
           <span>报告风格</span>
@@ -328,7 +358,6 @@
 
     <div hidden>
       <input id="agentTask" value="分析项目架构、核心模块和代码符号" />
-      <input id="codingModelName" />
       <input id="codingApiKey" />
       <input id="codingBaseUrl" />
       <button id="analyzeBtn" type="button">分析</button>
@@ -336,6 +365,6 @@
       <button id="diagnoseBtn" type="button">诊断</button>
     </div>
 
-    <script src="/app.js?v=0.5.0"></script>
+    <script src="/app.js?v=0.6.5"></script>
   </body>
 </html>

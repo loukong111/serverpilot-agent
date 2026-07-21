@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import time
 import urllib.request
 from typing import Any
@@ -45,8 +46,9 @@ def main() -> int:
 
     health = request_json(args.base_url, "/api/health")
     require(health.get("ok") is True, "health check failed")
-    require(health.get("version") == "0.4.0", f"unexpected server version: {health.get('version')}")
-    print("health: ok")
+    version = str(health.get("version", ""))
+    require(re.fullmatch(r"\d+\.\d+\.\d+", version) is not None, f"invalid server version: {version}")
+    print(f"health: ok (version {version})")
 
     unavailable_llm = {
         "use_llm": True,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
@@ -10,6 +11,7 @@ from agent.project_agent.coding_agent import (
     apply_proposal,
     collect_code_context,
     load_proposal,
+    parse_coding_edits,
     parse_coding_response,
     rollback_proposal,
     save_proposal,
@@ -144,6 +146,29 @@ class CodingAgentTest(unittest.TestCase):
         with self.assertRaisesRegex(CodingAgentError, "不允许修改"):
             validate_patch(self.project, generated)
 
+    def test_context_ignores_prefixed_build_directories(self) -> None:
+        generated = self.project / "build-qt" / "CMakeCache.txt"
+        generated.parent.mkdir()
+        generated.write_text("generated cache\n" * 2000, encoding="utf-8")
+
+        context = collect_code_context(self.project, "修改 value", max_context_bytes=4096)
+        paths = [item["path"] for item in context["files"]]
+
+        self.assertNotIn("build-qt/CMakeCache.txt", paths)
+        self.assertLessEqual(context["context_bytes"], 4096)
+
+    def test_context_respects_local_model_byte_limit(self) -> None:
+        self.source.write_text("int value = 1;\n" * 1000, encoding="utf-8")
+
+        context = collect_code_context(
+            self.project,
+            "修改 value",
+            max_files=2,
+            max_context_bytes=2048,
+        )
+
+        self.assertLessEqual(context["context_bytes"], 2048)
+
     def test_validate_patch_rejects_file_deletion(self) -> None:
         deletion = (
             "diff --git a/src/value.cpp b/src/value.cpp\n"
@@ -164,6 +189,283 @@ class CodingAgentTest(unittest.TestCase):
         parsed = parse_coding_response(response)
         self.assertEqual("修改", parsed["summary"])
         self.assertTrue(parsed["patch"].endswith("\n"))
+
+    def test_parse_coding_response_adds_missing_git_diff_header(self) -> None:
+        response = (
+            '{"summary":"修改", "plan":[], "risks":[], "tests":[], '
+            '"patch":"--- a/src/value.cpp\\n+++ b/src/value.cpp\\n'
+            '@@ -1 +1 @@\\n-int value() { return 1; }\\n'
+            '+int value() { return 2; }\\n"}'
+        )
+
+        parsed = parse_coding_response(response)
+
+        self.assertTrue(parsed["patch"].startswith("diff --git a/src/value.cpp b/src/value.cpp\n"))
+        self.assertEqual(["src/value.cpp"], validate_patch(self.project, parsed["patch"]))
+
+    def test_parse_coding_response_adds_missing_context_prefix(self) -> None:
+        response = (
+            '{"summary":"修改", "plan":[], "risks":[], "tests":[], '
+            '"patch":"--- a/src/value.cpp\\n+++ b/src/value.cpp\\n'
+            '@@ -1 +1,2 @@\\nint value() { return 1; }\\n'
+            '+int other() { return 2; }\\n"}'
+        )
+
+        parsed = parse_coding_response(response)
+
+        self.assertIn("\n int value() { return 1; }\n", parsed["patch"])
+        self.assertEqual(["src/value.cpp"], validate_patch(self.project, parsed["patch"]))
+
+    def test_parse_coding_response_recovers_missing_addition_prefix_from_source(self) -> None:
+        response = (
+            '{"summary":"新增函数", "plan":[], "risks":[], "tests":[], '
+            '"patch":"--- a/src/value.cpp\\n+++ b/src/value.cpp\\n'
+            '@@ -1 +1,2 @@\\nint value() { return 1; }\\n'
+            'int other() { return 2; }\\n"}'
+        )
+
+        parsed = parse_coding_response(response, self.project)
+
+        self.assertIn("\n int value() { return 1; }\n", parsed["patch"])
+        self.assertIn("\n+int other() { return 2; }\n", parsed["patch"])
+        self.assertEqual(["src/value.cpp"], validate_patch(self.project, parsed["patch"]))
+
+    def test_parse_coding_response_recovers_unprefixed_indented_lines(self) -> None:
+        self.source.write_text(
+            "int value() {\n    return 1;\n}\n",
+            encoding="utf-8",
+        )
+        response = (
+            '{"summary":"新增局部变量", "plan":[], "risks":[], "tests":[], '
+            '"patch":"--- a/src/value.cpp\\n+++ b/src/value.cpp\\n'
+            '@@ -1,3 +1,4 @@\\nint value() {\\n'
+            '    int other = 2;\\n    return 1;\\n}\\n"}'
+        )
+
+        parsed = parse_coding_response(response, self.project)
+
+        self.assertIn("\n+    int other = 2;\n", parsed["patch"])
+        self.assertIn("\n     return 1;\n", parsed["patch"])
+        self.assertEqual(["src/value.cpp"], validate_patch(self.project, parsed["patch"]))
+
+    def test_parse_coding_response_removes_stray_diff_preamble_path(self) -> None:
+        response = json.dumps(
+            {
+                "summary": "调整返回值",
+                "plan": [],
+                "risks": [],
+                "tests": [],
+                "patch": (
+                    "diff --git a/src/value.cpp b/src/value.cpp\n"
+                    "index 1234567..89abcdef 100644\n"
+                    "src/values.cpp\n"
+                    "--- a/src/value.cpp\n"
+                    "+++ b/src/value.cpp\n"
+                    "@@ -1 +1 @@\n"
+                    "-int value() { return 1; }\n"
+                    "+int value() { return 2; }\n"
+                ),
+            },
+            ensure_ascii=False,
+        )
+
+        parsed = parse_coding_response(response, self.project)
+
+        self.assertNotIn("src/values.cpp", parsed["patch"])
+        self.assertEqual(["src/value.cpp"], validate_patch(self.project, parsed["patch"]))
+
+    def test_parse_coding_response_repairs_real_local_model_diff(self) -> None:
+        target = self.project / "tests" / "value_test.cpp"
+        target.parent.mkdir()
+        target.write_text(
+            "#include <cassert>\n\n"
+            "int main() {\n"
+            "    assert(1 + 1 == 2);\n"
+            "    return 0;\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        response = json.dumps(
+            {
+                "summary": "添加断言",
+                "plan": [],
+                "risks": [],
+                "tests": ["value_test"],
+                "patch": (
+                    "diff --git a/tests/value_test.cpp b/tests/value_test.cpp\n"
+                    "index 1234567..89abcdef 100644\n"
+                    "test/value_tests.cpp\n"
+                    "--- a/tests/value_test.cpp\n"
+                    "+++ b/tests/value_test.cpp\n"
+                    "@@ -1,4 +1,5 @@\n"
+                    "#include <cassert>\n\n"
+                    "int main() {\n"
+                    "    assert(1 + 1 == 2);\n"
+                    "+    assert(2 + 2 == 4);\n"
+                    "    return 0;\n"
+                    "}\n"
+                ),
+            },
+            ensure_ascii=False,
+        )
+
+        parsed = parse_coding_response(response, self.project)
+
+        self.assertNotIn("test/value_tests.cpp", parsed["patch"])
+        self.assertEqual(["tests/value_test.cpp"], validate_patch(self.project, parsed["patch"]))
+
+    def test_parse_coding_edits_generates_valid_diff(self) -> None:
+        response = json.dumps(
+            {
+                "summary": "新增函数",
+                "plan": ["修改实现"],
+                "risks": [],
+                "tests": ["运行测试"],
+                "edits": [
+                    {
+                        "path": "src/value.cpp",
+                        "start_line": 1,
+                        "end_line": 1,
+                        "replacement": (
+                            "int value() { return 1; }\n"
+                            "int other() { return 2; }"
+                        ),
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        )
+
+        parsed = parse_coding_edits(response, self.project)
+
+        self.assertIn("+int other() { return 2; }", parsed["patch"])
+        self.assertEqual(["src/value.cpp"], validate_patch(self.project, parsed["patch"]))
+
+    def test_parse_coding_edits_allows_append_after_last_line(self) -> None:
+        response = json.dumps(
+            {
+                "summary": "追加函数",
+                "plan": [],
+                "risks": [],
+                "tests": [],
+                "edits": [
+                    {
+                        "path": "src/value.cpp",
+                        "start_line": 2,
+                        "end_line": 2,
+                        "replacement": "int other() { return 2; }",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        )
+
+        parsed = parse_coding_edits(response, self.project)
+
+        self.assertIn("+int other() { return 2; }", parsed["patch"])
+        self.assertEqual(["src/value.cpp"], validate_patch(self.project, parsed["patch"]))
+
+    def test_parse_coding_edits_normalizes_virtual_append_position(self) -> None:
+        response = json.dumps(
+            {
+                "summary": "追加函数",
+                "plan": [],
+                "risks": [],
+                "tests": [],
+                "edits": [
+                    {
+                        "path": "src/value.cpp",
+                        "start_line": 10,
+                        "end_line": 10,
+                        "replacement": "int other() { return 2; }",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        )
+
+        parsed = parse_coding_edits(response, self.project)
+
+        self.assertIn("+int other() { return 2; }", parsed["patch"])
+        self.assertEqual(["src/value.cpp"], validate_patch(self.project, parsed["patch"]))
+
+    def test_parse_coding_edits_normalizes_virtual_append_range(self) -> None:
+        response = json.dumps(
+            {
+                "summary": "追加函数",
+                "plan": [],
+                "risks": [],
+                "tests": [],
+                "edits": [
+                    {
+                        "path": "src/value.cpp",
+                        "start_line": 6,
+                        "end_line": 10,
+                        "replacement": "int other() { return 2; }",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        )
+
+        parsed = parse_coding_edits(response, self.project)
+
+        self.assertIn("+int other() { return 2; }", parsed["patch"])
+        self.assertEqual(["src/value.cpp"], validate_patch(self.project, parsed["patch"]))
+
+    def test_parse_coding_edits_clamps_range_to_end_of_file(self) -> None:
+        response = json.dumps(
+            {
+                "summary": "修改文件末尾",
+                "plan": [],
+                "risks": [],
+                "tests": [],
+                "edits": [
+                    {
+                        "path": "src/value.cpp",
+                        "start_line": 1,
+                        "end_line": 2,
+                        "replacement": (
+                            "int value() { return 1; }\n"
+                            "int other() { return 2; }"
+                        ),
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        )
+
+        parsed = parse_coding_edits(response, self.project)
+
+        self.assertIn("+int other() { return 2; }", parsed["patch"])
+        self.assertEqual(["src/value.cpp"], validate_patch(self.project, parsed["patch"]))
+
+    def test_parse_coding_edits_resolves_unique_misplaced_path(self) -> None:
+        header = self.project / "include" / "value.h"
+        header.parent.mkdir()
+        header.write_text("int value();\n", encoding="utf-8")
+        response = json.dumps(
+            {
+                "summary": "追加声明",
+                "plan": [],
+                "risks": [],
+                "tests": [],
+                "edits": [
+                    {
+                        "path": "src/value.h",
+                        "start_line": 2,
+                        "end_line": 2,
+                        "replacement": "int other();",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        )
+
+        parsed = parse_coding_edits(response, self.project)
+
+        self.assertIn("diff --git a/include/value.h b/include/value.h", parsed["patch"])
+        self.assertEqual(["include/value.h"], validate_patch(self.project, parsed["patch"]))
 
 
 if __name__ == "__main__":

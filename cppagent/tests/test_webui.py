@@ -77,6 +77,134 @@ class WebUIFallbackTest(unittest.TestCase):
         self.assertIn("离线报告", result["llm_warning"])
         self.assertTrue(Path(result["history_item"]["report_path"]).exists())
 
+    @mock.patch.object(server, "get_analysis")
+    def test_coding_rejects_missing_llm_config_before_analysis(
+        self, analysis: mock.Mock
+    ) -> None:
+        environment = {
+            "OPENAI_API_KEY": "",
+            "OPENAI_MODEL": "",
+            "PROJECTAGENTCPP_MODEL": "",
+        }
+        with mock.patch.dict(server.os.environ, environment, clear=False):
+            with self.assertRaisesRegex(LLMConfigurationError, "配置模型"):
+                server.handle_coding(
+                    {"project_path": str(self.project), "task": "修改 value"},
+                    server.noop_progress,
+                    server.never_cancel,
+                )
+
+        analysis.assert_not_called()
+
+    @mock.patch.object(server, "get_analysis")
+    def test_coding_rejects_legacy_vague_task_before_analysis(
+        self, analysis: mock.Mock
+    ) -> None:
+        with self.assertRaisesRegex(ValueError, "任务描述过于宽泛"):
+            server.handle_coding(
+                {
+                    "project_path": str(self.project),
+                    "task": "为项目补充一个小型功能，并添加对应单元测试",
+                    "provider": "ollama",
+                }
+            )
+
+        analysis.assert_not_called()
+
+    @mock.patch.object(server, "get_analysis")
+    def test_coding_routes_diagnostic_only_task_before_analysis(
+        self, analysis: mock.Mock
+    ) -> None:
+        with self.assertRaisesRegex(ValueError, "请切换到「诊断」模式"):
+            server.handle_coding(
+                {
+                    "project_path": str(self.project),
+                    "task": "帮我做一下测试看看能不能正常运行",
+                    "provider": "ollama",
+                }
+            )
+
+        analysis.assert_not_called()
+
+    def test_diagnostic_intent_allows_explicit_code_changes(self) -> None:
+        self.assertTrue(server.is_diagnostic_only_task("帮我测试看看能不能正常运行"))
+        self.assertFalse(server.is_diagnostic_only_task("修复测试失败并补充单元测试"))
+
+    def test_llm_configuration_status_does_not_expose_key(self) -> None:
+        environment = {
+            "OPENAI_API_KEY": "secret-test-key",
+            "OPENROUTER_API_KEY": "",
+            "PROJECTAGENTCPP_MODEL": "test-model",
+        }
+        with mock.patch.dict(server.os.environ, environment, clear=False):
+            status = server.llm_configuration_status()
+
+        self.assertEqual(
+            {
+                "model_configured": True,
+                "api_key_configured": True,
+                "openai_api_key_configured": True,
+                "openrouter_api_key_configured": False,
+            },
+            status,
+        )
+        self.assertNotIn("secret-test-key", str(status))
+
+    def test_ollama_provider_uses_safe_local_defaults_without_key(self) -> None:
+        config = server.llm_config_from_payload(
+            {"provider": "ollama"}, timeout_seconds=30, temperature=0.1
+        )
+
+        self.assertEqual("qwen2.5-coder:1.5b", config.model)
+        self.assertEqual("http://127.0.0.1:11434/v1", config.base_url)
+        self.assertEqual("ollama", config.api_key)
+        self.assertEqual(300, config.timeout_seconds)
+
+        client = server.coding_llm_client({"provider": "ollama"}, temperature=0.15)
+        self.assertEqual("qwen2.5-coder:3b", client.config.model)
+        self.assertEqual(0.0, client.config.temperature)
+        response_format = server.coding_response_format({"provider": "ollama"})
+        self.assertEqual("json_schema", response_format["type"])
+        self.assertIn("patch", response_format["json_schema"]["schema"]["required"])
+        self.assertEqual(768, server.coding_max_tokens({"provider": "ollama"}))
+        self.assertFalse(server.coding_uses_edits({"provider": "ollama"}))
+
+    def test_ollama_coding_context_is_small_and_ignores_build_outputs(self) -> None:
+        generated = self.project / "build-qt" / "CMakeCache.txt"
+        generated.parent.mkdir()
+        generated.write_text("generated\n" * 4000, encoding="utf-8")
+
+        context = server.coding_context(
+            self.project,
+            "修改 value 返回值",
+            {"provider": "ollama"},
+        )
+
+        self.assertLessEqual(context["context_bytes"], server.OLLAMA_CODING_CONTEXT_BYTES)
+        self.assertLessEqual(len(context["files"]), server.OLLAMA_CODING_MAX_FILES)
+        self.assertNotIn("build-qt/CMakeCache.txt", [item["path"] for item in context["files"]])
+
+    def test_ollama_status_reports_installed_models(self) -> None:
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = json.dumps(
+            {
+                "models": [
+                    {"name": "qwen2.5-coder:1.5b"},
+                    {"name": "qwen2.5-coder:3b"},
+                    {"name": "other:latest"},
+                ]
+            }
+        ).encode("utf-8")
+        with mock.patch.object(server.urllib.request, "urlopen", return_value=response):
+            status = server.ollama_status()
+
+        self.assertTrue(status["available"])
+        self.assertTrue(status["default_model_installed"])
+        self.assertTrue(status["default_coding_model_installed"])
+        self.assertEqual(
+            ["other:latest", "qwen2.5-coder:1.5b", "qwen2.5-coder:3b"], status["models"]
+        )
+
     @mock.patch.object(server, "get_analysis", return_value=SAMPLE_ANALYSIS)
     @mock.patch.object(server, "generate_llm_answer", side_effect=LLMRequestError("network unavailable"))
     def test_ask_falls_back_when_llm_request_fails(self, _llm: mock.Mock, _analysis: mock.Mock) -> None:
@@ -138,6 +266,56 @@ class WebUIFallbackTest(unittest.TestCase):
         rolled_back = server.handle_coding_rollback({"proposal_id": proposed["proposal"]["id"]})
         self.assertEqual("rolled_back", rolled_back["proposal"]["status"])
         self.assertIn("return 1", self.source.read_text(encoding="utf-8"))
+
+    @mock.patch.object(server, "get_analysis", return_value=SAMPLE_ANALYSIS)
+    @mock.patch.object(server.LLMClient, "chat")
+    def test_ollama_retries_malformed_diff_once(
+        self, chat: mock.Mock, _analysis: mock.Mock
+    ) -> None:
+        malformed = json.dumps(
+            {
+                "summary": "调整返回值",
+                "plan": [],
+                "risks": [],
+                "tests": [],
+                "patch": (
+                    "diff --git a/src/value.cpp b/src/value.cpp\n"
+                    "--- a/src/value.cpp\n+++ b/src/value.cpp\n"
+                    "-int value() { return 1; }\n+int value() { return 2; }\n"
+                ),
+            },
+            ensure_ascii=False,
+        )
+        valid = json.dumps(
+            {
+                "summary": "调整返回值",
+                "plan": ["修改实现"],
+                "risks": [],
+                "tests": ["ctest --test-dir build"],
+                "patch": (
+                    "diff --git a/src/value.cpp b/src/value.cpp\n"
+                    "--- a/src/value.cpp\n+++ b/src/value.cpp\n"
+                    "@@ -1 +1 @@\n"
+                    "-int value() { return 1; }\n+int value() { return 2; }\n"
+                ),
+            },
+            ensure_ascii=False,
+        )
+        chat.side_effect = [malformed, valid]
+
+        result = server.handle_coding(
+            {
+                "project_path": str(self.project),
+                "task": "把 value 返回值改为 2",
+                "provider": "ollama",
+                "model": "qwen2.5-coder:3b",
+            }
+        )
+
+        self.assertEqual("pending", result["proposal"]["status"])
+        self.assertEqual(2, chat.call_count)
+        correction_messages = chat.call_args_list[1].args[0]
+        self.assertIn("未通过校验", correction_messages[-1]["content"])
 
     @mock.patch.object(server, "get_analysis", return_value=SAMPLE_ANALYSIS)
     @mock.patch.object(server.LLMClient, "chat")

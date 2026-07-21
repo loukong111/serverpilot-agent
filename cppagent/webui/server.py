@@ -10,6 +10,8 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.error
+import urllib.request
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -49,7 +51,9 @@ from agent.project_agent.coding_agent import (  # noqa: E402
     build_repair_messages,
     collect_code_context,
     diagnostic_failure_summary,
+    is_ignored_directory,
     load_proposal,
+    parse_coding_edits,
     parse_coding_response,
     proposal_markdown,
     rollback_proposal,
@@ -65,6 +69,7 @@ from agent.project_agent.llm_client import (  # noqa: E402
     LLMClient,
     LLMConfig,
     LLMConfigurationError,
+    LLMRequestCancelled,
     LLMRequestError,
 )
 from agent.project_agent.prompts import build_interview_messages, build_report_messages  # noqa: E402
@@ -80,6 +85,41 @@ STYLE_PROMPTS = {
     "deep": "这次报告请偏深挖问题，强调架构边界、潜在风险、测试缺口和下一步改进路线。",
 }
 REPAIRABLE_DIAGNOSTIC_STEPS = {"configure", "build", "test"}
+OLLAMA_BASE_URL = "http://127.0.0.1:11434/v1"
+OLLAMA_TAGS_URL = "http://127.0.0.1:11434/api/tags"
+OLLAMA_DEFAULT_MODEL = "qwen2.5-coder:1.5b"
+OLLAMA_DEFAULT_CODING_MODEL = "qwen2.5-coder:3b"
+OLLAMA_REQUEST_TIMEOUT_SECONDS = 300
+OLLAMA_CODING_MAX_TOKENS = 768
+OLLAMA_CODING_MAX_FILES = 4
+OLLAMA_CODING_CONTEXT_BYTES = 12 * 1024
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+OPENROUTER_DEFAULT_MODEL = "openrouter/free"
+DIAGNOSTIC_TASK_MARKERS = (
+    "测试",
+    "构建",
+    "编译",
+    "运行",
+    "启动",
+    "能不能正常",
+    "能否正常",
+    "是否正常",
+    "检查项目",
+)
+CODE_CHANGE_TASK_MARKERS = (
+    "修改",
+    "新增",
+    "添加",
+    "实现",
+    "修复",
+    "改成",
+    "补充",
+    "删除",
+    "移除",
+    "重构",
+    "替换",
+    "优化代码",
+)
 
 ANALYSIS_CACHE: dict[str, tuple[tuple[int, int], dict[str, Any]]] = {}
 CACHE_LOCK = threading.Lock()
@@ -95,6 +135,13 @@ def noop_progress(_value: int, _message: str) -> None:
 
 def never_cancel() -> bool:
     return False
+
+
+def is_diagnostic_only_task(task: str) -> bool:
+    normalized = re.sub(r"\s+", "", task)
+    has_diagnostic_intent = any(marker in normalized for marker in DIAGNOSTIC_TASK_MARKERS)
+    has_code_change_intent = any(marker in normalized for marker in CODE_CHANGE_TASK_MARKERS)
+    return has_diagnostic_intent and not has_code_change_intent
 
 
 def check_cancel(should_cancel: CancelCallback) -> None:
@@ -147,10 +194,9 @@ def output_paths(prefix: str) -> tuple[Path, Path]:
 def project_signature(project_path: Path) -> tuple[int, int]:
     latest_mtime = 0
     file_count = 0
-    ignored = {".git", ".idea", ".vscode", "build", "cmake-build-debug", "cmake-build-release", "__pycache__"}
     relevant_suffixes = {".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".cmake", ".md", ".txt"}
     for current, directories, files in os.walk(project_path):
-        directories[:] = [name for name in directories if name not in ignored]
+        directories[:] = [name for name in directories if not is_ignored_directory(name)]
         for name in files:
             path = Path(current) / name
             if name != "CMakeLists.txt" and path.suffix.lower() not in relevant_suffixes:
@@ -281,8 +327,6 @@ def run_agent_trace(project_path: Path, task: str) -> tuple[dict[str, Any], dict
 
 
 def generate_llm_report(data: dict[str, Any], payload: dict[str, Any]) -> str:
-    model = str(payload.get("model") or os.environ.get("PROJECTAGENTCPP_MODEL") or os.environ.get("OPENAI_MODEL") or "")
-    base_url = str(payload.get("base_url") or os.environ.get("PROJECTAGENTCPP_BASE_URL") or os.environ.get("OPENAI_BASE_URL") or "https://api.openai.com/v1")
     style = str(payload.get("style") or "interview")
     task = str(payload.get("task") or "").strip()
     messages = build_report_messages(data)
@@ -298,11 +342,8 @@ def generate_llm_report(data: dict[str, Any], payload: dict[str, Any]) -> str:
         }
     )
     client = LLMClient(
-        LLMConfig(
-            model=model,
-            base_url=base_url,
-            api_key_env=str(payload.get("api_key_env") or "OPENAI_API_KEY"),
-            api_key=str(payload.get("api_key") or ""),
+        llm_config_from_payload(
+            payload,
             timeout_seconds=90,
             temperature=float(payload.get("temperature") or 0.75),
         )
@@ -311,8 +352,6 @@ def generate_llm_report(data: dict[str, Any], payload: dict[str, Any]) -> str:
 
 
 def generate_llm_answer(data: dict[str, Any], question: str, payload: dict[str, Any]) -> str:
-    model = str(payload.get("model") or os.environ.get("PROJECTAGENTCPP_MODEL") or os.environ.get("OPENAI_MODEL") or "")
-    base_url = str(payload.get("base_url") or os.environ.get("PROJECTAGENTCPP_BASE_URL") or os.environ.get("OPENAI_BASE_URL") or "https://api.openai.com/v1")
     messages = build_interview_messages(data, question)
     messages.append(
         {
@@ -324,11 +363,8 @@ def generate_llm_answer(data: dict[str, Any], question: str, payload: dict[str, 
         }
     )
     client = LLMClient(
-        LLMConfig(
-            model=model,
-            base_url=base_url,
-            api_key_env=str(payload.get("api_key_env") or "OPENAI_API_KEY"),
-            api_key=str(payload.get("api_key") or ""),
+        llm_config_from_payload(
+            payload,
             timeout_seconds=90,
             temperature=float(payload.get("temperature") or 0.7),
         )
@@ -342,7 +378,280 @@ def friendly_llm_error(error: Exception) -> str:
         return "未配置 API Key"
     if "Missing model" in message:
         return "未配置模型"
+    if "HTTP 401" in message or "HTTP 403" in message:
+        return "LLM 认证失败，请检查 API Key 和接口权限"
+    if "HTTP 404" in message:
+        return "没有找到 LLM 接口或模型，请检查 Base URL 和模型名称"
+    if "HTTP 429" in message:
+        return "LLM 请求过于频繁或额度不足，请稍后重试"
+    if "timed out" in message.lower():
+        return "LLM 响应超时，本地模型可能仍在生成，请稍后重试或选择更小的模型"
+    if "urlopen error" in message:
+        return "无法连接 LLM 服务，请检查 Base URL 和网络"
     return f"LLM 请求失败：{message}"
+
+
+def llm_configuration_status() -> dict[str, bool]:
+    return {
+        "model_configured": bool(
+            os.environ.get("PROJECTAGENTCPP_MODEL") or os.environ.get("OPENAI_MODEL")
+        ),
+        "api_key_configured": bool(
+            os.environ.get("OPENAI_API_KEY") or os.environ.get("OPENROUTER_API_KEY")
+        ),
+        "openai_api_key_configured": bool(os.environ.get("OPENAI_API_KEY")),
+        "openrouter_api_key_configured": bool(os.environ.get("OPENROUTER_API_KEY")),
+    }
+
+
+def llm_config_from_payload(
+    payload: dict[str, Any], timeout_seconds: int, temperature: float
+) -> LLMConfig:
+    provider = str(payload.get("provider") or "custom").strip().lower()
+    if provider == "ollama":
+        return LLMConfig(
+            model=str(payload.get("model") or OLLAMA_DEFAULT_MODEL).strip(),
+            base_url=OLLAMA_BASE_URL,
+            api_key_env="",
+            api_key="ollama",
+            timeout_seconds=max(timeout_seconds, OLLAMA_REQUEST_TIMEOUT_SECONDS),
+            temperature=temperature,
+        )
+    if provider == "openrouter":
+        return LLMConfig(
+            model=str(payload.get("model") or OPENROUTER_DEFAULT_MODEL).strip(),
+            base_url=OPENROUTER_BASE_URL,
+            api_key_env="OPENROUTER_API_KEY",
+            api_key=str(payload.get("api_key") or "").strip(),
+            timeout_seconds=timeout_seconds,
+            temperature=temperature,
+        )
+    return LLMConfig(
+        model=str(
+            payload.get("model")
+            or os.environ.get("PROJECTAGENTCPP_MODEL")
+            or os.environ.get("OPENAI_MODEL")
+            or ""
+        ).strip(),
+        base_url=str(
+            payload.get("base_url")
+            or os.environ.get("PROJECTAGENTCPP_BASE_URL")
+            or os.environ.get("OPENAI_BASE_URL")
+            or "https://api.openai.com/v1"
+        ).strip(),
+        api_key_env=str(payload.get("api_key_env") or "OPENAI_API_KEY"),
+        api_key=str(payload.get("api_key") or "").strip(),
+        timeout_seconds=timeout_seconds,
+        temperature=temperature,
+    )
+
+
+def coding_llm_client(payload: dict[str, Any], temperature: float) -> LLMClient:
+    provider = str(payload.get("provider") or "custom").strip().lower()
+    coding_payload = payload
+    if provider == "ollama" and not str(payload.get("model") or "").strip():
+        coding_payload = {**payload, "model": OLLAMA_DEFAULT_CODING_MODEL}
+    config = llm_config_from_payload(
+        coding_payload,
+        timeout_seconds=120,
+        temperature=0.0 if provider == "ollama" else temperature,
+    )
+    if not config.model:
+        raise LLMConfigurationError(
+            "修改代码需要配置模型，请点击右上角「设置」并填写模型名称。"
+        )
+    if not config.api_key and not os.environ.get(config.api_key_env):
+        raise LLMConfigurationError(
+            "修改代码需要配置 API Key，请点击右上角「设置」后再生成修改方案。"
+        )
+    return LLMClient(config)
+
+
+def coding_response_format(payload: dict[str, Any]) -> dict[str, Any] | None:
+    provider = str(payload.get("provider") or "custom").strip().lower()
+    if provider != "ollama":
+        return None
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "code_change",
+            "strict": True,
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "summary": {"type": "string"},
+                    "plan": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "maxItems": 5,
+                    },
+                    "risks": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "maxItems": 5,
+                    },
+                    "tests": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "maxItems": 5,
+                    },
+                    "patch": {"type": "string"},
+                },
+                "required": ["summary", "plan", "risks", "tests", "patch"],
+                "additionalProperties": False,
+            },
+        },
+    }
+
+
+def coding_max_tokens(payload: dict[str, Any]) -> int | None:
+    provider = str(payload.get("provider") or "custom").strip().lower()
+    return OLLAMA_CODING_MAX_TOKENS if provider == "ollama" else None
+
+
+def coding_uses_edits(payload: dict[str, Any]) -> bool:
+    return False
+
+
+def coding_context(project_path: Path, task: str, payload: dict[str, Any]) -> dict[str, Any]:
+    provider = str(payload.get("provider") or "custom").strip().lower()
+    if provider == "ollama":
+        return collect_code_context(
+            project_path,
+            task,
+            max_files=OLLAMA_CODING_MAX_FILES,
+            max_context_bytes=OLLAMA_CODING_CONTEXT_BYTES,
+        )
+    return collect_code_context(project_path, task)
+
+
+def generate_coding_response(
+    client: LLMClient,
+    messages: list[dict[str, str]],
+    payload: dict[str, Any],
+    progress: ProgressCallback,
+    should_cancel: CancelCallback,
+    message: str,
+) -> str:
+    provider = str(payload.get("provider") or "custom").strip().lower()
+    stream = provider == "ollama"
+    generated_chars = 0
+    reported_chars = 0
+
+    def on_delta(delta: str) -> None:
+        nonlocal generated_chars, reported_chars
+        check_cancel(should_cancel)
+        generated_chars += len(delta)
+        if generated_chars - reported_chars < 80:
+            return
+        reported_chars = generated_chars
+        value = min(78, 62 + generated_chars // 120)
+        progress(value, f"{message}（已生成 {generated_chars} 字符）")
+
+    try:
+        return client.chat(
+            messages,
+            response_format=coding_response_format(payload),
+            max_tokens=coding_max_tokens(payload),
+            stream=stream,
+            on_delta=on_delta if stream else None,
+            should_cancel=should_cancel if stream else None,
+        )
+    except LLMRequestCancelled as exc:
+        raise JobCancelled("任务已取消") from exc
+
+
+def parse_and_validate_coding_response(
+    response: str,
+    project_path: Path,
+    use_edits: bool,
+) -> dict[str, Any]:
+    proposal = (
+        parse_coding_edits(response, project_path)
+        if use_edits
+        else parse_coding_response(response, project_path)
+    )
+    validate_patch(project_path, proposal["patch"])
+    return proposal
+
+
+def finalize_coding_response(
+    response: str,
+    messages: list[dict[str, str]],
+    project_path: Path,
+    client: LLMClient,
+    payload: dict[str, Any],
+    progress: ProgressCallback,
+    should_cancel: CancelCallback,
+    use_edits: bool,
+) -> dict[str, Any]:
+    try:
+        return parse_and_validate_coding_response(response, project_path, use_edits)
+    except CodingAgentError as exc:
+        provider = str(payload.get("provider") or "custom").strip().lower()
+        retryable = any(
+            marker in str(exc)
+            for marker in ("JSON", "unified diff", "补丁校验失败", "缺少结构化 edits")
+        )
+        if provider != "ollama" or not retryable:
+            raise
+
+        check_cancel(should_cancel)
+        progress(80, "本地模型输出格式不完整，正在自动修正")
+        correction_messages = messages + [
+            {"role": "assistant", "content": response[:16000]},
+            {
+                "role": "user",
+                "content": (
+                    f"上一份修改方案未通过校验：{exc}\n"
+                    "请重新返回完整 JSON。保留原任务意图，修正所有 Diff 文件头和 @@ hunk，"
+                    "确保每个新增、删除及上下文行都有正确前缀。不要解释，不要使用 Markdown code fence。"
+                ),
+            },
+        ]
+        corrected = generate_coding_response(
+            client,
+            correction_messages,
+            payload,
+            progress,
+            should_cancel,
+            "Coding Agent 正在修正修改方案格式",
+        )
+        return parse_and_validate_coding_response(corrected, project_path, use_edits)
+
+
+def ollama_status() -> dict[str, Any]:
+    try:
+        request = urllib.request.Request(OLLAMA_TAGS_URL, method="GET")
+        with urllib.request.urlopen(request, timeout=2) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        models = sorted(
+            {
+                str(item.get("name") or item.get("model") or "").strip()
+                for item in payload.get("models", [])
+                if isinstance(item, dict)
+            }
+            - {""}
+        )
+        return {
+            "available": True,
+            "base_url": OLLAMA_BASE_URL,
+            "default_model": OLLAMA_DEFAULT_MODEL,
+            "default_coding_model": OLLAMA_DEFAULT_CODING_MODEL,
+            "models": models,
+            "default_model_installed": OLLAMA_DEFAULT_MODEL in models,
+            "default_coding_model_installed": OLLAMA_DEFAULT_CODING_MODEL in models,
+        }
+    except (OSError, TimeoutError, ValueError, urllib.error.URLError, json.JSONDecodeError):
+        return {
+            "available": False,
+            "base_url": OLLAMA_BASE_URL,
+            "default_model": OLLAMA_DEFAULT_MODEL,
+            "default_coding_model": OLLAMA_DEFAULT_CODING_MODEL,
+            "models": [],
+            "default_model_installed": False,
+            "default_coding_model_installed": False,
+        }
 
 
 def handle_analyze(
@@ -427,45 +736,48 @@ def handle_coding(
     task = str(payload.get("task") or "").strip()
     if not task:
         raise ValueError("请输入代码修改任务。")
+    if is_diagnostic_only_task(task):
+        raise ValueError(
+            "该任务只要求构建、测试或运行检查，不需要生成代码补丁。请切换到「诊断」模式。"
+        )
+    if task == "为项目补充一个小型功能，并添加对应单元测试":
+        raise ValueError(
+            "任务描述过于宽泛，请说明具体功能或问题，例如：为配置解析增加端口范围校验，并补充单元测试。"
+        )
+    client = coding_llm_client(payload, temperature=0.15)
 
     progress(8, "正在分析项目事实")
     analysis = get_analysis(project_path, progress, should_cancel)
     check_cancel(should_cancel)
     progress(46, "正在检索相关源码")
-    context = collect_code_context(project_path, task)
+    context = coding_context(project_path, task, payload)
     if not context["files"]:
         raise CodingAgentError("没有找到可供修改的源码文件。")
 
     check_cancel(should_cancel)
     progress(62, "Coding Agent 正在生成修改方案")
-    model = str(
-        payload.get("model")
-        or os.environ.get("PROJECTAGENTCPP_MODEL")
-        or os.environ.get("OPENAI_MODEL")
-        or ""
+    use_edits = coding_uses_edits(payload)
+    messages = build_coding_messages(task, analysis, context, use_edits=use_edits)
+    response = generate_coding_response(
+        client,
+        messages,
+        payload,
+        progress,
+        should_cancel,
+        "Coding Agent 正在生成修改方案",
     )
-    base_url = str(
-        payload.get("base_url")
-        or os.environ.get("PROJECTAGENTCPP_BASE_URL")
-        or os.environ.get("OPENAI_BASE_URL")
-        or "https://api.openai.com/v1"
-    )
-    client = LLMClient(
-        LLMConfig(
-            model=model,
-            base_url=base_url,
-            api_key_env=str(payload.get("api_key_env") or "OPENAI_API_KEY"),
-            api_key=str(payload.get("api_key") or ""),
-            timeout_seconds=120,
-            temperature=0.15,
-        )
-    )
-    response = client.chat(build_coding_messages(task, analysis, context))
-    proposal = parse_coding_response(response)
-
     check_cancel(should_cancel)
     progress(82, "正在校验候选补丁")
-    validate_patch(project_path, proposal["patch"])
+    proposal = finalize_coding_response(
+        response,
+        messages,
+        project_path,
+        client,
+        payload,
+        progress,
+        should_cancel,
+        use_edits,
+    )
     record = save_proposal(PROPOSAL_DIR, project_path, task, proposal, context)
     markdown = proposal_markdown(record)
     trace = {
@@ -536,6 +848,7 @@ def handle_coding_repair(
     round_number = int(parent.get("round") or 1) + 1
     if round_number > 5:
         raise CodingAgentError("自动修复最多执行 5 轮，请人工检查当前错误。")
+    client = coding_llm_client(payload, temperature=0.1)
 
     progress(10, "正在读取失败诊断")
     history = load_history(diagnostic_history_id)
@@ -563,40 +876,41 @@ def handle_coding_repair(
     progress(28, f"正在准备第 {round_number} 轮修复上下文")
     analysis = get_analysis(project_path, progress, should_cancel)
     task = str(parent.get("task") or payload.get("task") or "修复构建和测试错误").strip()
-    context = collect_code_context(project_path, f"{task}\n{failure_summary[:5000]}")
+    context = coding_context(project_path, f"{task}\n{failure_summary[:5000]}", payload)
     if not context["files"]:
         raise CodingAgentError("没有找到与构建错误相关的源码文件。")
 
     check_cancel(should_cancel)
     progress(62, f"Coding Agent 正在生成第 {round_number} 轮修复")
-    model = str(
-        payload.get("model")
-        or os.environ.get("PROJECTAGENTCPP_MODEL")
-        or os.environ.get("OPENAI_MODEL")
-        or ""
+    use_edits = coding_uses_edits(payload)
+    messages = build_repair_messages(
+        task,
+        analysis,
+        context,
+        repair_diagnostic,
+        parent,
+        use_edits=use_edits,
     )
-    base_url = str(
-        payload.get("base_url")
-        or os.environ.get("PROJECTAGENTCPP_BASE_URL")
-        or os.environ.get("OPENAI_BASE_URL")
-        or "https://api.openai.com/v1"
+    response = generate_coding_response(
+        client,
+        messages,
+        payload,
+        progress,
+        should_cancel,
+        f"Coding Agent 正在生成第 {round_number} 轮修复",
     )
-    client = LLMClient(
-        LLMConfig(
-            model=model,
-            base_url=base_url,
-            api_key_env=str(payload.get("api_key_env") or "OPENAI_API_KEY"),
-            api_key=str(payload.get("api_key") or ""),
-            timeout_seconds=120,
-            temperature=0.1,
-        )
-    )
-    response = client.chat(build_repair_messages(task, analysis, context, repair_diagnostic, parent))
-    proposal = parse_coding_response(response)
-
     check_cancel(should_cancel)
     progress(84, "正在校验修复补丁")
-    validate_patch(project_path, proposal["patch"])
+    proposal = finalize_coding_response(
+        response,
+        messages,
+        project_path,
+        client,
+        payload,
+        progress,
+        should_cancel,
+        use_edits,
+    )
     record = save_proposal(
         PROPOSAL_DIR,
         project_path,
@@ -957,6 +1271,8 @@ class JobManager:
         except subprocess.CalledProcessError as exc:
             detail = (exc.stderr or exc.stdout or "Command failed").strip()
             self._fail(job, detail)
+        except LLMRequestError as exc:
+            self._fail(job, friendly_llm_error(exc))
         except Exception as exc:  # noqa: BLE001
             self._fail(job, str(exc))
 
@@ -979,13 +1295,19 @@ JOB_MANAGER = JobManager()
 
 
 class WebUIHandler(BaseHTTPRequestHandler):
-    server_version = "ProjectAgentCppWeb/0.4.0"
+    server_version = "ProjectAgentCppWeb/0.6.5"
 
     def do_GET(self) -> None:
         path = unquote(urlsplit(self.path).path)
         try:
             if path == "/api/health":
-                json_response(self, {"ok": True, "root": str(ROOT), "version": "0.4.0"})
+                json_response(self, {"ok": True, "root": str(ROOT), "version": "0.6.5"})
+                return
+            if path == "/api/config":
+                json_response(self, {"ok": True, "llm": llm_configuration_status()})
+                return
+            if path == "/api/providers/ollama":
+                json_response(self, {"ok": True, "ollama": ollama_status()})
                 return
             if path == "/api/history":
                 json_response(self, {"ok": True, "items": list_history()})

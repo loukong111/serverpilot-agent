@@ -43,6 +43,21 @@ class FrontendStaticTest(unittest.TestCase):
             self.assertEqual("tabpanel", self.by_id[panel_id].get("role"))
             self.assertEqual(tab_id, self.by_id[panel_id].get("aria-labelledby"))
 
+    def test_diagnostic_only_tasks_are_routed_before_coding(self) -> None:
+        self.assertIn("function isDiagnosticOnlyTask(task)", self.javascript)
+        self.assertIn('state.taskMode === "coding" && isDiagnosticOnlyTask(task)', self.javascript)
+        self.assertIn('$("diagnoseMode").value = "build-test"', self.javascript)
+
+    def test_diagnostic_result_has_summary_and_separate_detail_report(self) -> None:
+        self.assertIn("function renderDiagnosticSummary(diagnostic)", self.javascript)
+        self.assertIn("setDiagnosticSummary(result.diagnostic)", self.javascript)
+        self.assertIn('setDetailedReport(result.markdown || "")', self.javascript)
+        self.assertIn("detailReportTab", self.by_id)
+        self.assertIn("detailReportView", self.by_id)
+        self.assertIn("detailReportOutput", self.by_id)
+        self.assertIn('/styles.css?v=0.6.5', self.html)
+        self.assertIn('/app.js?v=0.6.5', self.html)
+
 
 if __name__ == "__main__":
     unittest.main()
